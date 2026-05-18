@@ -231,6 +231,23 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 Switch(checked = colorTuningOn, onCheckedChange = { colorTuningOn = it })
             }
 
+            // ── Diagnostic: 한 색만 hue +100 으로 셋팅 ──────────────
+            // 정상이면 해당 색 영역만 ~45° 회전 (Red→Orange, Green→Cyan, Blue→Purple)
+            // 다른 색은 거의 변화 없어야 함.
+            fun setOnlyHue(colorIndex: Int, value: Float) {
+                animJob?.cancel()
+                temperatureUi = 0f; contrastUi = 0f; tintUi = 0f; saturationUi = 0f
+                brightnessUi = 0f; exposureUi = 0f; highlightsUi = 0f; shadowsUi = 0f
+                colorTuningParams21 = FloatArray(21).apply { this[colorIndex * 3] = value }
+                colorTuningOn = true
+            }
+            Text("Diagnostic (only one color)", fontFamily = FontFamily.Monospace)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { setOnlyHue(0, 100f) }) { Text("Red H+100") }
+                Button(onClick = { setOnlyHue(3, 100f) }) { Text("Green H+100") }
+                Button(onClick = { setOnlyHue(4, 100f) }) { Text("Blue H+100") }
+            }
+
             EffectSlider("Temperature", temperatureUi) { temperatureUi = it }
             EffectSlider("Contrast", contrastUi) { contrastUi = it }
             EffectSlider("Tint", tintUi) { tintUi = it }
