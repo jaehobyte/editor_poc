@@ -21,6 +21,10 @@ fun ImageGLView(
     contrastUi: Float = 0f,
     tintUi: Float = 0f,
     saturationUi: Float = 0f,
+    brightnessUi: Float = 0f,
+    exposureUi: Float = 0f,
+    highlightsUi: Float = 0f,
+    shadowsUi: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
     val renderer = remember { ImageRenderer() }
@@ -40,6 +44,7 @@ fun ImageGLView(
             renderer.setContrastCurve(contrastCurve(contrastUi))
             renderer.setTintUi(tintUi)
             renderer.setSaturationMatrix(saturationMatrix(saturationUi))
+            renderer.setLumaParams(brightnessUi, exposureUi, highlightsUi, shadowsUi)
             view.requestRender()
         },
     )

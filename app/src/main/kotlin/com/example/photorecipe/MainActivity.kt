@@ -69,6 +69,10 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var contrastUi by remember { mutableStateOf(0f) }
     var tintUi by remember { mutableStateOf(0f) }
     var saturationUi by remember { mutableStateOf(0f) }
+    var brightnessUi by remember { mutableStateOf(0f) }
+    var exposureUi by remember { mutableStateOf(0f) }
+    var highlightsUi by remember { mutableStateOf(0f) }
+    var shadowsUi by remember { mutableStateOf(0f) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -147,6 +151,10 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 contrastUi = contrastUi,
                 tintUi = tintUi,
                 saturationUi = saturationUi,
+                brightnessUi = brightnessUi,
+                exposureUi = exposureUi,
+                highlightsUi = highlightsUi,
+                shadowsUi = shadowsUi,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height),
@@ -158,6 +166,10 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                     contrastUi = 0f
                     tintUi = 0f
                     saturationUi = 0f
+                    brightnessUi = 0f
+                    exposureUi = 0f
+                    highlightsUi = 0f
+                    shadowsUi = 0f
                 }) { Text("Reset all") }
                 params?.let { p ->
                     Button(onClick = {
@@ -165,6 +177,10 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                         contrastUi = p[1] * 100f
                         tintUi = p[2] * 100f
                         saturationUi = p[3] * 100f
+                        brightnessUi = p[4] * 100f
+                        exposureUi = p[5] * 100f
+                        highlightsUi = p[6] * 100f
+                        shadowsUi = p[7] * 100f
                     }) { Text("Apply inferred") }
                 }
             }
@@ -173,6 +189,10 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
             EffectSlider("Contrast", contrastUi) { contrastUi = it }
             EffectSlider("Tint", tintUi) { tintUi = it }
             EffectSlider("Saturation", saturationUi) { saturationUi = it }
+            EffectSlider("Brightness", brightnessUi) { brightnessUi = it }
+            EffectSlider("Exposure", exposureUi) { exposureUi = it }
+            EffectSlider("Highlights", highlightsUi) { highlightsUi = it }
+            EffectSlider("Shadows", shadowsUi) { shadowsUi = it }
         }
 
         params?.let { p ->

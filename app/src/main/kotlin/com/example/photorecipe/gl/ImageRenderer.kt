@@ -23,6 +23,10 @@ class ImageRenderer : GLSurfaceView.Renderer {
     @Volatile private var contrast = 1f
     @Volatile private var tint = 0f
     @Volatile private var saturation = identityMat3()
+    @Volatile private var brightness = 0f
+    @Volatile private var exposure = 0f
+    @Volatile private var highlights = 0f
+    @Volatile private var shadows = 0f
 
     private var program = 0
     private var posLoc = 0
@@ -32,6 +36,10 @@ class ImageRenderer : GLSurfaceView.Renderer {
     private var contrastUniform = 0
     private var tintUniform = 0
     private var saturationUniform = 0
+    private var brightnessUniform = 0
+    private var exposureUniform = 0
+    private var highlightsUniform = 0
+    private var shadowsUniform = 0
 
     private var textureId = 0
     private var hasTexture = false
@@ -71,6 +79,14 @@ class ImageRenderer : GLSurfaceView.Renderer {
         this.saturation = m
     }
 
+    /** Brightness / Exposure / Highlights / Shadows UI 값 — 각 [-100, 100], 0 = identity. */
+    fun setLumaParams(brightnessUi: Float, exposureUi: Float, highlightsUi: Float, shadowsUi: Float) {
+        this.brightness = brightnessUi.coerceIn(-100f, 100f)
+        this.exposure = exposureUi.coerceIn(-100f, 100f)
+        this.highlights = highlightsUi.coerceIn(-100f, 100f)
+        this.shadows = shadowsUi.coerceIn(-100f, 100f)
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         // DESIGN.md: 캔버스 영역은 중간 회색 (이미지 색상 인식 방해 방지)
         GLES30.glClearColor(0.16f, 0.16f, 0.16f, 1f)
@@ -88,6 +104,10 @@ class ImageRenderer : GLSurfaceView.Renderer {
         contrastUniform = GLES30.glGetUniformLocation(program, "u_contrast")
         tintUniform = GLES30.glGetUniformLocation(program, "u_tint")
         saturationUniform = GLES30.glGetUniformLocation(program, "u_saturation")
+        brightnessUniform = GLES30.glGetUniformLocation(program, "u_brightness")
+        exposureUniform   = GLES30.glGetUniformLocation(program, "u_exposure")
+        highlightsUniform = GLES30.glGetUniformLocation(program, "u_highlights")
+        shadowsUniform    = GLES30.glGetUniformLocation(program, "u_shadows")
 
         setupQuad()
         setupTexture()
@@ -150,6 +170,10 @@ class ImageRenderer : GLSurfaceView.Renderer {
         GLES30.glUniform1f(contrastUniform, contrast)
         GLES30.glUniform1f(tintUniform, tint.coerceIn(-100f, 100f))
         GLES30.glUniformMatrix3fv(saturationUniform, 1, false, saturation, 0)
+        GLES30.glUniform1f(brightnessUniform, brightness)
+        GLES30.glUniform1f(exposureUniform,   exposure)
+        GLES30.glUniform1f(highlightsUniform, highlights)
+        GLES30.glUniform1f(shadowsUniform,    shadows)
         GLES30.glBindVertexArray(vao)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
         GLES30.glBindVertexArray(0)
