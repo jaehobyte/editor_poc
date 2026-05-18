@@ -34,11 +34,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import com.example.photorecipe.editor.colorAnimationFactor
+import com.example.photorecipe.editor.toneAnimationFactor
 import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.ImageGLView
 import com.example.photorecipe.ui.theme.NewCamTheme
 import com.example.photorecipe.util.downscaleForGL
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -77,6 +83,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     // 21개 color-tuning UI 값 (Red.H, Red.S, Red.L, Orange.H, ...). 0 = no effect.
     var colorTuningParams21 by remember { mutableStateOf(FloatArray(21)) }
     var colorTuningOn by remember { mutableStateOf(false) }
+    var animJob: Job? by remember { mutableStateOf(null) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -168,6 +175,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
+                    animJob?.cancel()
                     temperatureUi = 0f
                     contrastUi = 0f
                     tintUi = 0f
@@ -181,6 +189,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 }) { Text("Reset all") }
                 params?.let { p ->
                     Button(onClick = {
+                        animJob?.cancel()
                         temperatureUi = p[0] * 100f
                         contrastUi = p[1] * 100f
                         tintUi = p[2] * 100f
@@ -192,6 +201,28 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                         colorTuningParams21 = FloatArray(21) { p[8 + it] * 100f }
                         colorTuningOn = true
                     }) { Text("Apply inferred") }
+                    Button(onClick = {
+                        animJob?.cancel()
+                        animJob = scope.launch {
+                            colorTuningOn = true
+                            Animatable(0f).animateTo(
+                                targetValue = 1f,
+                                animationSpec = tween(durationMillis = 3000, easing = LinearEasing),
+                            ) {
+                                val tf = toneAnimationFactor(value)
+                                val cf = colorAnimationFactor(value)
+                                temperatureUi = p[0] * 100f * tf
+                                contrastUi    = p[1] * 100f * tf
+                                tintUi        = p[2] * 100f * tf
+                                saturationUi  = p[3] * 100f * tf
+                                brightnessUi  = p[4] * 100f * tf
+                                exposureUi    = p[5] * 100f * tf
+                                highlightsUi  = p[6] * 100f * tf
+                                shadowsUi     = p[7] * 100f * tf
+                                colorTuningParams21 = FloatArray(21) { p[8 + it] * 100f * cf }
+                            }
+                        }
+                    }) { Text("Animate inferred") }
                 }
             }
 
