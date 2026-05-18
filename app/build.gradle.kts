@@ -48,6 +48,9 @@ android {
         getByName("main") {
             kotlin.srcDirs("src/main/kotlin")
         }
+        getByName("test") {
+            kotlin.srcDirs("src/test/kotlin")
+        }
     }
 }
 
@@ -65,4 +68,6 @@ dependencies {
     implementation(libs.tensorflow.lite)
 
     debugImplementation(libs.androidx.ui.tooling)
+
+    testImplementation(libs.junit)
 }

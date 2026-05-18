@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.ImageGLView
 import com.example.photorecipe.ui.theme.NewCamTheme
+import com.example.photorecipe.util.downscaleForGL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -157,15 +158,6 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     }
 }
 
-/** GL 텍스처 업로드를 위한 안전한 크기로 다운샘플. */
-private fun downscaleForGL(bitmap: Bitmap, maxDim: Int = 2048): Bitmap {
-    val w = bitmap.width
-    val h = bitmap.height
-    val maxSide = maxOf(w, h)
-    if (maxSide <= maxDim) return bitmap
-    val scale = maxDim.toFloat() / maxSide
-    return Bitmap.createScaledBitmap(bitmap, (w * scale).toInt(), (h * scale).toInt(), true)
-}
 
 private val PARAM_NAMES: List<String> = buildList {
     addAll(listOf("Temperature", "Contrast", "Tint", "Saturation",
