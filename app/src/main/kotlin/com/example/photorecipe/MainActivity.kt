@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -64,6 +65,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var status by remember { mutableStateOf("Reference, Input 사진을 모두 선택하세요.") }
     var params by remember { mutableStateOf<FloatArray?>(null) }
     var inputBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var temperatureUi by remember { mutableStateOf(0f) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -138,10 +140,26 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
         inputBitmap?.let { bmp ->
             ImageGLView(
                 bitmap = bmp,
+                temperatureUi = temperatureUi,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height),
             )
+
+            Text("Temperature: %+.1f".format(temperatureUi), fontFamily = FontFamily.Monospace)
+            Slider(
+                value = temperatureUi,
+                onValueChange = { temperatureUi = it },
+                valueRange = -100f..100f,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { temperatureUi = 0f }) { Text("Reset") }
+                params?.let { p ->
+                    Button(onClick = { temperatureUi = p[0] * 100f }) {
+                        Text("Apply inferred (%+.1f)".format(p[0] * 100f))
+                    }
+                }
+            }
         }
 
         params?.let { p ->

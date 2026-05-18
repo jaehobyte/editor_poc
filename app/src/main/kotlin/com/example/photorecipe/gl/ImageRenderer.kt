@@ -18,10 +18,14 @@ class ImageRenderer : GLSurfaceView.Renderer {
 
     private val pendingBitmap = AtomicReference<Bitmap?>(null)
 
+    // 현재 적용할 WB 곱셈. (1,1,1) = identity (passthrough).
+    @Volatile private var wb = floatArrayOf(1f, 1f, 1f)
+
     private var program = 0
     private var posLoc = 0
     private var uvLoc = 0
     private var texUniform = 0
+    private var wbUniform = 0
 
     private var textureId = 0
     private var hasTexture = false
@@ -39,12 +43,18 @@ class ImageRenderer : GLSurfaceView.Renderer {
         pendingBitmap.set(bitmap)
     }
 
+    /** Temperature WB 곱셈 계수 업데이트 (`wbMultipliers` 결과). */
+    fun setWbMultipliers(wb: FloatArray) {
+        require(wb.size == 3) { "wb must have 3 elements" }
+        this.wb = wb
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         // DESIGN.md: 캔버스 영역은 중간 회색 (이미지 색상 인식 방해 방지)
         GLES30.glClearColor(0.16f, 0.16f, 0.16f, 1f)
 
         val vs = compileShader(GLES30.GL_VERTEX_SHADER, PASSTHROUGH_VERT)
-        val fs = compileShader(GLES30.GL_FRAGMENT_SHADER, PASSTHROUGH_FRAG)
+        val fs = compileShader(GLES30.GL_FRAGMENT_SHADER, TEMPERATURE_FRAG)
         program = linkProgram(vs, fs)
         GLES30.glDeleteShader(vs)
         GLES30.glDeleteShader(fs)
@@ -52,6 +62,7 @@ class ImageRenderer : GLSurfaceView.Renderer {
         posLoc = GLES30.glGetAttribLocation(program, "a_pos")
         uvLoc = GLES30.glGetAttribLocation(program, "a_uv")
         texUniform = GLES30.glGetUniformLocation(program, "u_tex")
+        wbUniform = GLES30.glGetUniformLocation(program, "u_wb")
 
         setupQuad()
         setupTexture()
@@ -109,6 +120,8 @@ class ImageRenderer : GLSurfaceView.Renderer {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
         GLES30.glUniform1i(texUniform, 0)
+        val wbSnapshot = wb
+        GLES30.glUniform3f(wbUniform, wbSnapshot[0], wbSnapshot[1], wbSnapshot[2])
         GLES30.glBindVertexArray(vao)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
         GLES30.glBindVertexArray(0)
