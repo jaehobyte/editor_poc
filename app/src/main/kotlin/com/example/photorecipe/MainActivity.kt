@@ -67,6 +67,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var inputBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var temperatureUi by remember { mutableStateOf(0f) }
     var contrastUi by remember { mutableStateOf(0f) }
+    var tintUi by remember { mutableStateOf(0f) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -143,6 +144,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 bitmap = bmp,
                 temperatureUi = temperatureUi,
                 contrastUi = contrastUi,
+                tintUi = tintUi,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height),
@@ -152,11 +154,13 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 Button(onClick = {
                     temperatureUi = 0f
                     contrastUi = 0f
+                    tintUi = 0f
                 }) { Text("Reset all") }
                 params?.let { p ->
                     Button(onClick = {
                         temperatureUi = p[0] * 100f
                         contrastUi = p[1] * 100f
+                        tintUi = p[2] * 100f
                     }) { Text("Apply inferred") }
                 }
             }
@@ -172,6 +176,13 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
             Slider(
                 value = contrastUi,
                 onValueChange = { contrastUi = it },
+                valueRange = -100f..100f,
+            )
+
+            Text("Tint: %+.1f".format(tintUi), fontFamily = FontFamily.Monospace)
+            Slider(
+                value = tintUi,
+                onValueChange = { tintUi = it },
                 valueRange = -100f..100f,
             )
         }

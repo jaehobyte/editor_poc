@@ -11,17 +11,14 @@ import com.example.photorecipe.editor.wbMultipliers
 import com.example.photorecipe.gl.ImageRenderer
 
 /**
- * Compose 안에 GLSurfaceView 를 띄우는 래퍼.
- *
- * @param bitmap 입력 비트맵
- * @param temperatureUi [-100, 100], 0 = identity
- * @param contrastUi    [-100, 100], 0 = identity
+ * Compose 안에 GLSurfaceView 를 띄우는 래퍼. 모든 ui 값은 [-100, 100], 0 = identity.
  */
 @Composable
 fun ImageGLView(
     bitmap: Bitmap,
     temperatureUi: Float = 0f,
     contrastUi: Float = 0f,
+    tintUi: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
     val renderer = remember { ImageRenderer() }
@@ -39,6 +36,7 @@ fun ImageGLView(
             renderer.setBitmap(bitmap)
             renderer.setWbMultipliers(wbMultipliers(temperatureUi))
             renderer.setContrastCurve(contrastCurve(contrastUi))
+            renderer.setTintUi(tintUi)
             view.requestRender()
         },
     )
