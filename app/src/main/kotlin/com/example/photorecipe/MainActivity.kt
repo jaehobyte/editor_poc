@@ -1,5 +1,6 @@
 package com.example.photorecipe
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
@@ -11,7 +12,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -20,7 +23,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,6 +33,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.example.photorecipe.tflite.RecipeGenerator
+import com.example.photorecipe.ui.ImageGLView
 import com.example.photorecipe.ui.theme.NewCamTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -59,6 +62,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var inputUri by remember { mutableStateOf<Uri?>(null) }
     var status by remember { mutableStateOf("Reference, Input 사진을 모두 선택하세요.") }
     var params by remember { mutableStateOf<FloatArray?>(null) }
+    var inputBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -72,9 +76,6 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     }
 
     val generator = remember { RecipeGenerator(context) }
-    LaunchedEffect(Unit) {
-        // RecipeGenerator 는 Composition 라이프사이클 동안 유지
-    }
 
     Column(
         modifier = modifier
@@ -105,6 +106,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 val inUri = inputUri ?: return@Button
                 status = "추론 중..."
                 params = null
+                inputBitmap = null
                 scope.launch {
                     val result = runCatching {
                         withContext(Dispatchers.IO) {
@@ -114,12 +116,14 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                             val inp = context.contentResolver.openInputStream(inUri)!!.use {
                                 BitmapFactory.decodeStream(it)
                             }
-                            generator.infer(ref, inp)
+                            val p = generator.infer(ref, inp)
+                            p to downscaleForGL(inp)
                         }
                     }
                     result.fold(
-                        onSuccess = {
-                            params = it
+                        onSuccess = { (p, bmp) ->
+                            params = p
+                            inputBitmap = bmp
                             status = "완료. 29개 파라미터:"
                         },
                         onFailure = { status = "에러: ${it.message}" },
@@ -129,6 +133,15 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
         ) { Text("추론 실행") }
 
         Text(status)
+
+        inputBitmap?.let { bmp ->
+            ImageGLView(
+                bitmap = bmp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(bmp.width.toFloat() / bmp.height),
+            )
+        }
 
         params?.let { p ->
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -142,6 +155,16 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
             }
         }
     }
+}
+
+/** GL 텍스처 업로드를 위한 안전한 크기로 다운샘플. */
+private fun downscaleForGL(bitmap: Bitmap, maxDim: Int = 2048): Bitmap {
+    val w = bitmap.width
+    val h = bitmap.height
+    val maxSide = maxOf(w, h)
+    if (maxSide <= maxDim) return bitmap
+    val scale = maxDim.toFloat() / maxSide
+    return Bitmap.createScaledBitmap(bitmap, (w * scale).toInt(), (h * scale).toInt(), true)
 }
 
 private val PARAM_NAMES: List<String> = buildList {

@@ -60,6 +60,13 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Project-Specific Guidelines
+
+- UI/styling 작업 시 반드시 `DESIGN.md`를 참고하여 색상, 타이포그래피, 컴포넌트 스타일을 일관되게 적용한다.
+
+## 6. Implementation Approach
+All new feature implementations must follow the test-driven-development skill: failing test first, minimal code, refactor.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
