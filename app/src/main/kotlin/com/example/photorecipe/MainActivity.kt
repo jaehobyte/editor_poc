@@ -1,50 +1,34 @@
 package com.example.photorecipe
 
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.tween
-import com.example.photorecipe.editor.colorAnimationFactor
-import com.example.photorecipe.editor.toneAnimationFactor
 import com.example.photorecipe.tflite.RecipeGenerator
-import com.example.photorecipe.ui.ImageGLView
+import com.example.photorecipe.ui.PickerScreen
+import com.example.photorecipe.ui.EditorScreen
 import com.example.photorecipe.ui.theme.NewCamTheme
+import com.example.photorecipe.ui.theme.PhotoColors
 import com.example.photorecipe.util.downscaleForGL
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -54,8 +38,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             NewCamTheme {
-                Scaffold { padding ->
-                    InferencePoc(modifier = Modifier.padding(padding))
+                Scaffold(containerColor = PhotoColors.RunwayBlack) { padding ->
+                    AppRoot(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()))
                 }
             }
         }
@@ -63,228 +47,84 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun InferencePoc(modifier: Modifier = Modifier) {
+private fun AppRoot(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
-    var referenceUri by remember { mutableStateOf<Uri?>(null) }
-    var inputUri by remember { mutableStateOf<Uri?>(null) }
-    var status by remember { mutableStateOf("Reference, Input 사진을 모두 선택하세요.") }
-    var params by remember { mutableStateOf<FloatArray?>(null) }
-    var inputBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var temperatureUi by remember { mutableStateOf(0f) }
-    var contrastUi by remember { mutableStateOf(0f) }
-    var tintUi by remember { mutableStateOf(0f) }
-    var saturationUi by remember { mutableStateOf(0f) }
-    var brightnessUi by remember { mutableStateOf(0f) }
-    var exposureUi by remember { mutableStateOf(0f) }
-    var highlightsUi by remember { mutableStateOf(0f) }
-    var shadowsUi by remember { mutableStateOf(0f) }
-    // 21개 color-tuning UI 값 (Red.H, Red.S, Red.L, Orange.H, ...). 0 = no effect.
-    var colorTuningParams21 by remember { mutableStateOf(FloatArray(21)) }
-    var colorTuningOn by remember { mutableStateOf(false) }
-    var animJob: Job? by remember { mutableStateOf(null) }
-
-    val pickRef = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) referenceUri = uri
-    }
-    val pickInput = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) inputUri = uri
-    }
-
     val generator = remember { RecipeGenerator(context) }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("newCam — TFLite Inference PoC", style = MaterialTheme.typography.titleLarge)
+    val pick = remember { PickState() }
+    val params = remember { EditorParams() }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                pickRef.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            }) {
-                Text(if (referenceUri == null) "Reference 선택" else "Reference ✓")
-            }
-            Button(onClick = {
-                pickInput.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            }) {
-                Text(if (inputUri == null) "Input 선택" else "Input ✓")
-            }
-        }
+    var phase by remember { mutableStateOf<AppPhase>(AppPhase.Picker) }
+    var generating by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
-        Button(
-            enabled = referenceUri != null && inputUri != null,
-            onClick = {
-                val refUri = referenceUri ?: return@Button
-                val inUri = inputUri ?: return@Button
-                status = "추론 중..."
-                params = null
-                inputBitmap = null
-                scope.launch {
-                    val result = runCatching {
-                        withContext(Dispatchers.IO) {
-                            val ref = context.contentResolver.openInputStream(refUri)!!.use {
-                                BitmapFactory.decodeStream(it)
-                            }
-                            val inp = context.contentResolver.openInputStream(inUri)!!.use {
-                                BitmapFactory.decodeStream(it)
-                            }
-                            val p = generator.infer(ref, inp)
-                            p to downscaleForGL(inp)
-                        }
-                    }
-                    result.fold(
-                        onSuccess = { (p, bmp) ->
-                            params = p
-                            inputBitmap = bmp
-                            status = "완료. 29개 파라미터:"
-                        },
-                        onFailure = { status = "에러: ${it.message}" },
-                    )
-                }
-            }
-        ) { Text("추론 실행") }
-
-        Text(status)
-
-        inputBitmap?.let { bmp ->
-            ImageGLView(
-                bitmap = bmp,
-                temperatureUi = temperatureUi,
-                contrastUi = contrastUi,
-                tintUi = tintUi,
-                saturationUi = saturationUi,
-                brightnessUi = brightnessUi,
-                exposureUi = exposureUi,
-                highlightsUi = highlightsUi,
-                shadowsUi = shadowsUi,
-                colorTuningParams21 = colorTuningParams21,
-                colorTuningOn = colorTuningOn,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(bmp.width.toFloat() / bmp.height),
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    animJob?.cancel()
-                    temperatureUi = 0f
-                    contrastUi = 0f
-                    tintUi = 0f
-                    saturationUi = 0f
-                    brightnessUi = 0f
-                    exposureUi = 0f
-                    highlightsUi = 0f
-                    shadowsUi = 0f
-                    colorTuningParams21 = FloatArray(21)
-                    colorTuningOn = false
-                }) { Text("Reset all") }
-                params?.let { p ->
-                    Button(onClick = {
-                        animJob?.cancel()
-                        temperatureUi = p[0] * 100f
-                        contrastUi = p[1] * 100f
-                        tintUi = p[2] * 100f
-                        saturationUi = p[3] * 100f
-                        brightnessUi = p[4] * 100f
-                        exposureUi = p[5] * 100f
-                        highlightsUi = p[6] * 100f
-                        shadowsUi = p[7] * 100f
-                        colorTuningParams21 = FloatArray(21) { p[8 + it] * 100f }
-                        colorTuningOn = true
-                    }) { Text("Apply inferred") }
-                    Button(onClick = {
-                        animJob?.cancel()
-                        animJob = scope.launch {
-                            colorTuningOn = true
-                            Animatable(0f).animateTo(
-                                targetValue = 1f,
-                                animationSpec = tween(durationMillis = 3000, easing = LinearEasing),
-                            ) {
-                                val tf = toneAnimationFactor(value)
-                                val cf = colorAnimationFactor(value)
-                                temperatureUi = p[0] * 100f * tf
-                                contrastUi    = p[1] * 100f * tf
-                                tintUi        = p[2] * 100f * tf
-                                saturationUi  = p[3] * 100f * tf
-                                brightnessUi  = p[4] * 100f * tf
-                                exposureUi    = p[5] * 100f * tf
-                                highlightsUi  = p[6] * 100f * tf
-                                shadowsUi     = p[7] * 100f * tf
-                                colorTuningParams21 = FloatArray(21) { p[8 + it] * 100f * cf }
-                            }
-                        }
-                    }) { Text("Animate inferred") }
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Color Tuning")
-                Switch(checked = colorTuningOn, onCheckedChange = { colorTuningOn = it })
-            }
-
-            // ── Diagnostic: 한 색만 hue +100 으로 셋팅 ──────────────
-            // 정상이면 해당 색 영역만 ~45° 회전 (Red→Orange, Green→Cyan, Blue→Purple)
-            // 다른 색은 거의 변화 없어야 함.
-            fun setOnlyHue(colorIndex: Int, value: Float) {
-                animJob?.cancel()
-                temperatureUi = 0f; contrastUi = 0f; tintUi = 0f; saturationUi = 0f
-                brightnessUi = 0f; exposureUi = 0f; highlightsUi = 0f; shadowsUi = 0f
-                colorTuningParams21 = FloatArray(21).apply { this[colorIndex * 3] = value }
-                colorTuningOn = true
-            }
-            Text("Diagnostic (only one color)", fontFamily = FontFamily.Monospace)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { setOnlyHue(0, 100f) }) { Text("Red H+100") }
-                Button(onClick = { setOnlyHue(3, 100f) }) { Text("Green H+100") }
-                Button(onClick = { setOnlyHue(4, 100f) }) { Text("Blue H+100") }
-            }
-
-            EffectSlider("Temperature", temperatureUi) { temperatureUi = it }
-            EffectSlider("Contrast", contrastUi) { contrastUi = it }
-            EffectSlider("Tint", tintUi) { tintUi = it }
-            EffectSlider("Saturation", saturationUi) { saturationUi = it }
-            EffectSlider("Brightness", brightnessUi) { brightnessUi = it }
-            EffectSlider("Exposure", exposureUi) { exposureUi = it }
-            EffectSlider("Highlights", highlightsUi) { highlightsUi = it }
-            EffectSlider("Shadows", shadowsUi) { shadowsUi = it }
-        }
-
-        params?.let { p ->
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                p.forEachIndexed { i, v ->
-                    Text(
-                        text = "${PARAM_NAMES[i]}: %+.4f".format(v),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
+    LaunchedEffect(Unit) {
+        // RecipeGenerator 는 Activity 라이프사이클 동안 유지.
     }
-}
 
-
-@Composable
-private fun EffectSlider(label: String, value: Float, onChange: (Float) -> Unit) {
-    Text("$label: %+.1f".format(value), fontFamily = FontFamily.Monospace)
-    Slider(value = value, onValueChange = onChange, valueRange = -100f..100f)
-}
-
-private val PARAM_NAMES: List<String> = buildList {
-    addAll(listOf("Temperature", "Contrast", "Tint", "Saturation",
-                  "Brightness", "Exposure", "Highlights", "Shadows"))
-    for (color in listOf("Red", "Orange", "Yellow", "Green", "Blue", "Navy", "Purple")) {
-        add("$color.Hue")
-        add("$color.Sat")
-        add("$color.Lum")
+    Box(modifier = modifier.background(PhotoColors.RunwayBlack)) {
+        when (val p = phase) {
+            AppPhase.Picker -> PickerScreen(
+                referenceUri = pick.reference,
+                inputUri = pick.input,
+                isGenerating = generating,
+                onPickReference = { pick.reference = it },
+                onPickInput = { pick.input = it },
+                onGenerate = {
+                    val refUri = pick.reference ?: return@PickerScreen
+                    val inUri = pick.input ?: return@PickerScreen
+                    generating = true
+                    errorMessage = null
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                val refBmp = context.contentResolver.openInputStream(refUri)!!.use {
+                                    BitmapFactory.decodeStream(it)
+                                }
+                                val inBmp = context.contentResolver.openInputStream(inUri)!!.use {
+                                    BitmapFactory.decodeStream(it)
+                                }
+                                val inferred = generator.infer(refBmp, inBmp)
+                                inferred to downscaleForGL(inBmp)
+                            }
+                        }.fold(
+                            onSuccess = { (inferred, downBmp) ->
+                                params.reset()
+                                phase = AppPhase.Editing(downBmp, inferred)
+                            },
+                            onFailure = { errorMessage = it.message ?: "Inference failed" },
+                        )
+                        generating = false
+                    }
+                },
+            )
+            is AppPhase.Editing -> EditorScreen(
+                inputBitmap = p.inputBitmap,
+                inferred = p.params,
+                params = params,
+                onBack = { phase = AppPhase.Picker },
+            )
+        }
+        if (generating) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(PhotoColors.RunwayBlack.copy(alpha = 0.7f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(color = PhotoColors.PureWhite)
+            }
+        }
+        errorMessage?.let { msg ->
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                Text(
+                    text = msg,
+                    color = PhotoColors.PureWhite,
+                    modifier = Modifier.padding(24.dp),
+                )
+            }
+        }
     }
 }
