@@ -22,6 +22,7 @@ class ImageRenderer : GLSurfaceView.Renderer {
     @Volatile private var wb = floatArrayOf(1f, 1f, 1f)
     @Volatile private var contrast = 1f
     @Volatile private var tint = 0f
+    @Volatile private var saturation = identityMat3()
 
     private var program = 0
     private var posLoc = 0
@@ -30,6 +31,7 @@ class ImageRenderer : GLSurfaceView.Renderer {
     private var wbUniform = 0
     private var contrastUniform = 0
     private var tintUniform = 0
+    private var saturationUniform = 0
 
     private var textureId = 0
     private var hasTexture = false
@@ -63,6 +65,12 @@ class ImageRenderer : GLSurfaceView.Renderer {
         this.tint = ui
     }
 
+    /** Saturation 행렬 (`saturationMatrix` 의 9-element column-major 결과). */
+    fun setSaturationMatrix(m: FloatArray) {
+        require(m.size == 9) { "saturation matrix must have 9 elements" }
+        this.saturation = m
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         // DESIGN.md: 캔버스 영역은 중간 회색 (이미지 색상 인식 방해 방지)
         GLES30.glClearColor(0.16f, 0.16f, 0.16f, 1f)
@@ -79,6 +87,7 @@ class ImageRenderer : GLSurfaceView.Renderer {
         wbUniform = GLES30.glGetUniformLocation(program, "u_wb")
         contrastUniform = GLES30.glGetUniformLocation(program, "u_contrast")
         tintUniform = GLES30.glGetUniformLocation(program, "u_tint")
+        saturationUniform = GLES30.glGetUniformLocation(program, "u_saturation")
 
         setupQuad()
         setupTexture()
@@ -140,6 +149,7 @@ class ImageRenderer : GLSurfaceView.Renderer {
         GLES30.glUniform3f(wbUniform, wbSnapshot[0], wbSnapshot[1], wbSnapshot[2])
         GLES30.glUniform1f(contrastUniform, contrast)
         GLES30.glUniform1f(tintUniform, tint.coerceIn(-100f, 100f))
+        GLES30.glUniformMatrix3fv(saturationUniform, 1, false, saturation, 0)
         GLES30.glBindVertexArray(vao)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
         GLES30.glBindVertexArray(0)
@@ -173,3 +183,9 @@ class ImageRenderer : GLSurfaceView.Renderer {
         GLES30.glViewport(vx, vy, vw, vh)
     }
 }
+
+private fun identityMat3(): FloatArray = floatArrayOf(
+    1f, 0f, 0f,
+    0f, 1f, 0f,
+    0f, 0f, 1f,
+)

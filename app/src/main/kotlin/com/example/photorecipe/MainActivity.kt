@@ -68,6 +68,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var temperatureUi by remember { mutableStateOf(0f) }
     var contrastUi by remember { mutableStateOf(0f) }
     var tintUi by remember { mutableStateOf(0f) }
+    var saturationUi by remember { mutableStateOf(0f) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -145,6 +146,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 temperatureUi = temperatureUi,
                 contrastUi = contrastUi,
                 tintUi = tintUi,
+                saturationUi = saturationUi,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height),
@@ -155,36 +157,22 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                     temperatureUi = 0f
                     contrastUi = 0f
                     tintUi = 0f
+                    saturationUi = 0f
                 }) { Text("Reset all") }
                 params?.let { p ->
                     Button(onClick = {
                         temperatureUi = p[0] * 100f
                         contrastUi = p[1] * 100f
                         tintUi = p[2] * 100f
+                        saturationUi = p[3] * 100f
                     }) { Text("Apply inferred") }
                 }
             }
 
-            Text("Temperature: %+.1f".format(temperatureUi), fontFamily = FontFamily.Monospace)
-            Slider(
-                value = temperatureUi,
-                onValueChange = { temperatureUi = it },
-                valueRange = -100f..100f,
-            )
-
-            Text("Contrast: %+.1f".format(contrastUi), fontFamily = FontFamily.Monospace)
-            Slider(
-                value = contrastUi,
-                onValueChange = { contrastUi = it },
-                valueRange = -100f..100f,
-            )
-
-            Text("Tint: %+.1f".format(tintUi), fontFamily = FontFamily.Monospace)
-            Slider(
-                value = tintUi,
-                onValueChange = { tintUi = it },
-                valueRange = -100f..100f,
-            )
+            EffectSlider("Temperature", temperatureUi) { temperatureUi = it }
+            EffectSlider("Contrast", contrastUi) { contrastUi = it }
+            EffectSlider("Tint", tintUi) { tintUi = it }
+            EffectSlider("Saturation", saturationUi) { saturationUi = it }
         }
 
         params?.let { p ->
@@ -201,6 +189,12 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     }
 }
 
+
+@Composable
+private fun EffectSlider(label: String, value: Float, onChange: (Float) -> Unit) {
+    Text("$label: %+.1f".format(value), fontFamily = FontFamily.Monospace)
+    Slider(value = value, onValueChange = onChange, valueRange = -100f..100f)
+}
 
 private val PARAM_NAMES: List<String> = buildList {
     addAll(listOf("Temperature", "Contrast", "Tint", "Saturation",

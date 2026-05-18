@@ -7,6 +7,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.photorecipe.editor.contrastCurve
+import com.example.photorecipe.editor.saturationMatrix
 import com.example.photorecipe.editor.wbMultipliers
 import com.example.photorecipe.gl.ImageRenderer
 
@@ -19,6 +20,7 @@ fun ImageGLView(
     temperatureUi: Float = 0f,
     contrastUi: Float = 0f,
     tintUi: Float = 0f,
+    saturationUi: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
     val renderer = remember { ImageRenderer() }
@@ -37,6 +39,7 @@ fun ImageGLView(
             renderer.setWbMultipliers(wbMultipliers(temperatureUi))
             renderer.setContrastCurve(contrastCurve(contrastUi))
             renderer.setTintUi(tintUi)
+            renderer.setSaturationMatrix(saturationMatrix(saturationUi))
             view.requestRender()
         },
     )

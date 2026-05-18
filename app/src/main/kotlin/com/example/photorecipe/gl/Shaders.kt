@@ -27,12 +27,14 @@ void main() {
  *   1. Temperature  — RGB 채널별 wb 곱셈
  *   2. Contrast     — 0.5 + curve * (x - 0.5)
  *   3. Tint         — luminance-weighted green ↔ magenta
- *   (다음 sprints: Saturation, Brightness, Exposure, Highlights, Shadows)
+ *   4. Saturation   — fixed-point 3x3 mixing matrix
+ *   (다음 sprints: Brightness, Exposure, Highlights, Shadows)
  *
  * 모든 uniform 의 identity 값:
- *   u_wb       = (1, 1, 1)
- *   u_contrast = 1.0
- *   u_tint     = 0.0
+ *   u_wb         = (1, 1, 1)
+ *   u_contrast   = 1.0
+ *   u_tint       = 0.0
+ *   u_saturation = identity mat3
  */
 const val EFFECTS_FRAG = """#version 300 es
 precision mediump float;
@@ -41,6 +43,7 @@ uniform sampler2D u_tex;
 uniform vec3 u_wb;
 uniform float u_contrast;
 uniform float u_tint;
+uniform mat3 u_saturation;
 out vec4 outColor;
 
 const float L_MID  = 128.0 / 255.0;
@@ -76,6 +79,9 @@ void main() {
 
     // 3. Tint
     rgb = applyTint(rgb, u_tint);
+
+    // 4. Saturation
+    rgb = clamp(u_saturation * rgb, 0.0, 1.0);
 
     outColor = vec4(rgb, c.a);
 }
