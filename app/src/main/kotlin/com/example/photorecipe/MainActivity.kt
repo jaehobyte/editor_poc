@@ -66,6 +66,7 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var params by remember { mutableStateOf<FloatArray?>(null) }
     var inputBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var temperatureUi by remember { mutableStateOf(0f) }
+    var contrastUi by remember { mutableStateOf(0f) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -141,10 +142,24 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
             ImageGLView(
                 bitmap = bmp,
                 temperatureUi = temperatureUi,
+                contrastUi = contrastUi,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height),
             )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    temperatureUi = 0f
+                    contrastUi = 0f
+                }) { Text("Reset all") }
+                params?.let { p ->
+                    Button(onClick = {
+                        temperatureUi = p[0] * 100f
+                        contrastUi = p[1] * 100f
+                    }) { Text("Apply inferred") }
+                }
+            }
 
             Text("Temperature: %+.1f".format(temperatureUi), fontFamily = FontFamily.Monospace)
             Slider(
@@ -152,14 +167,13 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 onValueChange = { temperatureUi = it },
                 valueRange = -100f..100f,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { temperatureUi = 0f }) { Text("Reset") }
-                params?.let { p ->
-                    Button(onClick = { temperatureUi = p[0] * 100f }) {
-                        Text("Apply inferred (%+.1f)".format(p[0] * 100f))
-                    }
-                }
-            }
+
+            Text("Contrast: %+.1f".format(contrastUi), fontFamily = FontFamily.Monospace)
+            Slider(
+                value = contrastUi,
+                onValueChange = { contrastUi = it },
+                valueRange = -100f..100f,
+            )
         }
 
         params?.let { p ->
