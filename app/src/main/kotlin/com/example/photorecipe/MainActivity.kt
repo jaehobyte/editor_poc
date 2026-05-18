@@ -22,6 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -73,6 +74,9 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
     var exposureUi by remember { mutableStateOf(0f) }
     var highlightsUi by remember { mutableStateOf(0f) }
     var shadowsUi by remember { mutableStateOf(0f) }
+    // 21개 color-tuning UI 값 (Red.H, Red.S, Red.L, Orange.H, ...). 0 = no effect.
+    var colorTuningParams21 by remember { mutableStateOf(FloatArray(21)) }
+    var colorTuningOn by remember { mutableStateOf(false) }
 
     val pickRef = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -155,6 +159,8 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                 exposureUi = exposureUi,
                 highlightsUi = highlightsUi,
                 shadowsUi = shadowsUi,
+                colorTuningParams21 = colorTuningParams21,
+                colorTuningOn = colorTuningOn,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height),
@@ -170,6 +176,8 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                     exposureUi = 0f
                     highlightsUi = 0f
                     shadowsUi = 0f
+                    colorTuningParams21 = FloatArray(21)
+                    colorTuningOn = false
                 }) { Text("Reset all") }
                 params?.let { p ->
                     Button(onClick = {
@@ -181,8 +189,15 @@ private fun InferencePoc(modifier: Modifier = Modifier) {
                         exposureUi = p[5] * 100f
                         highlightsUi = p[6] * 100f
                         shadowsUi = p[7] * 100f
+                        colorTuningParams21 = FloatArray(21) { p[8 + it] * 100f }
+                        colorTuningOn = true
                     }) { Text("Apply inferred") }
                 }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Color Tuning")
+                Switch(checked = colorTuningOn, onCheckedChange = { colorTuningOn = it })
             }
 
             EffectSlider("Temperature", temperatureUi) { temperatureUi = it }

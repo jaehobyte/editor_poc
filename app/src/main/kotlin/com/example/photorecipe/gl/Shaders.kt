@@ -29,7 +29,7 @@ void main() {
  *   3. Tint         — luminance-weighted green ↔ magenta
  *   4. Saturation   — fixed-point 3x3 mixing matrix
  *   5-8. Brightness / Exposure / Highlights / Shadows — YCbCr Y 채널 위에서 순차 적용
- *   (다음 sprint: 7색 × HSL Color Tuning)
+ *   9. Color Tuning — RGB→HSL, 361-entry LUT lookup, HSL shift, HSL→RGB
  *
  * 모든 uniform 의 identity 값:
  *   u_wb         = (1, 1, 1)
@@ -37,6 +37,7 @@ void main() {
  *   u_tint       = 0.0
  *   u_saturation = identity mat3
  *   u_brightness, u_exposure, u_highlights, u_shadows = 0.0
+ *   u_colorTuningOn = false
  */
 const val EFFECTS_FRAG = """#version 300 es
 precision mediump float;
@@ -50,6 +51,8 @@ uniform float u_brightness;
 uniform float u_exposure;
 uniform float u_highlights;
 uniform float u_shadows;
+uniform sampler2D u_colorLut;
+uniform bool u_colorTuningOn;
 out vec4 outColor;
 
 const float L_MID         = 128.0 / 255.0;
@@ -106,6 +109,48 @@ float applyHighlightsY(float y, float ui) {
     return clamp(y + 0.00276 * ui * y * (1.275 * y - 0.4978), 0.0, 1.0);
 }
 
+vec3 rgbToHsl(vec3 c) {
+    float maxC = max(max(c.r, c.g), c.b);
+    float minC = min(min(c.r, c.g), c.b);
+    float l = (maxC + minC) * 0.5;
+    float h = 0.0;
+    float s = 0.0;
+    if (maxC != minC) {
+        float d = maxC - minC;
+        s = (l > 0.5) ? d / (2.0 - maxC - minC) : d / (maxC + minC);
+        if (maxC == c.r) {
+            h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+        } else if (maxC == c.g) {
+            h = (c.b - c.r) / d + 2.0;
+        } else {
+            h = (c.r - c.g) / d + 4.0;
+        }
+        h *= 60.0;
+    }
+    return vec3(h, s, l);
+}
+
+float hueToRgb(float p, float q, float t) {
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+    if (t < 0.5)       return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    return p;
+}
+
+vec3 hslToRgb(float h, float s, float l) {
+    if (s == 0.0) return vec3(l);
+    float q = (l < 0.5) ? (l * (1.0 + s)) : (l + s - l * s);
+    float p = 2.0 * l - q;
+    float hn = h / 360.0;
+    return vec3(
+        hueToRgb(p, q, hn + 1.0 / 3.0),
+        hueToRgb(p, q, hn),
+        hueToRgb(p, q, hn - 1.0 / 3.0)
+    );
+}
+
 float applyShadowsY(float y, float ui) {
     float yn;
     if (ui < 0.0) {
@@ -140,6 +185,18 @@ void main() {
     y = applyHighlightsY(y, u_highlights);
     y = applyShadowsY   (y, u_shadows);
     rgb = clamp(yCbCrToRgb(y, ycc.y, ycc.z), 0.0, 1.0);
+
+    // 9. Color Tuning (HSL space, 361-entry LUT)
+    if (u_colorTuningOn) {
+        vec3 hsl = rgbToHsl(rgb);
+        int idx = clamp(int(floor(hsl.x + 0.5)), 0, 360);
+        vec4 shift = texelFetch(u_colorLut, ivec2(idx, 0), 0);
+        float hN = mod(hsl.x + shift.r, 360.0);
+        if (hN < 0.0) hN += 360.0;
+        float sN = clamp(hsl.y + shift.g, 0.0, 1.0);
+        float lN = clamp(hsl.z + shift.b, 0.0, 1.0);
+        rgb = clamp(hslToRgb(hN, sN, lN), 0.0, 1.0);
+    }
 
     outColor = vec4(rgb, c.a);
 }

@@ -27,6 +27,8 @@ class ImageRenderer : GLSurfaceView.Renderer {
     @Volatile private var exposure = 0f
     @Volatile private var highlights = 0f
     @Volatile private var shadows = 0f
+    @Volatile private var colorTuningOn = false
+    private val pendingColorLut = AtomicReference<FloatArray?>(null)
 
     private var program = 0
     private var posLoc = 0
@@ -40,6 +42,9 @@ class ImageRenderer : GLSurfaceView.Renderer {
     private var exposureUniform = 0
     private var highlightsUniform = 0
     private var shadowsUniform = 0
+    private var colorLutUniform = 0
+    private var colorTuningOnUniform = 0
+    private var colorLutTextureId = 0
 
     private var textureId = 0
     private var hasTexture = false
@@ -87,6 +92,18 @@ class ImageRenderer : GLSurfaceView.Renderer {
         this.shadows = shadowsUi.coerceIn(-100f, 100f)
     }
 
+    /**
+     * Color tuning 토글. enabled=true 면 [lut] (361*4 RGBA32F 평탄 배열) 을 다음 frame 에서
+     * 업로드하고 셰이더가 적용. lut 가 null 이면 기존 텍스처 유지.
+     */
+    fun setColorTuning(enabled: Boolean, lut: FloatArray?) {
+        colorTuningOn = enabled
+        if (lut != null) {
+            require(lut.size == 361 * 4) { "color LUT must be 361*4 = 1444 elements" }
+            pendingColorLut.set(lut)
+        }
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         // DESIGN.md: 캔버스 영역은 중간 회색 (이미지 색상 인식 방해 방지)
         GLES30.glClearColor(0.16f, 0.16f, 0.16f, 1f)
@@ -108,9 +125,28 @@ class ImageRenderer : GLSurfaceView.Renderer {
         exposureUniform   = GLES30.glGetUniformLocation(program, "u_exposure")
         highlightsUniform = GLES30.glGetUniformLocation(program, "u_highlights")
         shadowsUniform    = GLES30.glGetUniformLocation(program, "u_shadows")
+        colorLutUniform        = GLES30.glGetUniformLocation(program, "u_colorLut")
+        colorTuningOnUniform   = GLES30.glGetUniformLocation(program, "u_colorTuningOn")
 
         setupQuad()
         setupTexture()
+        setupColorLutTexture()
+    }
+
+    private fun setupColorLutTexture() {
+        val tex = IntArray(1); GLES30.glGenTextures(1, tex, 0); colorLutTextureId = tex[0]
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLutTextureId)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_NEAREST)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_NEAREST)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        // 초기 zero LUT 업로드 (color tuning 꺼져 있어도 sampler binding 은 필요).
+        val zeros = java.nio.ByteBuffer.allocateDirect(361 * 4 * 4)
+            .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
+            361, 1, 0, GLES30.GL_RGBA, GLES30.GL_FLOAT, zeros,
+        )
     }
 
     private fun setupQuad() {
@@ -157,6 +193,7 @@ class ImageRenderer : GLSurfaceView.Renderer {
 
     override fun onDrawFrame(gl: GL10?) {
         pendingBitmap.getAndSet(null)?.let { uploadBitmap(it) }
+        pendingColorLut.getAndSet(null)?.let { uploadColorLut(it) }
 
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         if (!hasTexture) return
@@ -165,6 +202,10 @@ class ImageRenderer : GLSurfaceView.Renderer {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
         GLES30.glUniform1i(texUniform, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLutTextureId)
+        GLES30.glUniform1i(colorLutUniform, 1)
+        GLES30.glUniform1i(colorTuningOnUniform, if (colorTuningOn) 1 else 0)
         val wbSnapshot = wb
         GLES30.glUniform3f(wbUniform, wbSnapshot[0], wbSnapshot[1], wbSnapshot[2])
         GLES30.glUniform1f(contrastUniform, contrast)
@@ -187,6 +228,17 @@ class ImageRenderer : GLSurfaceView.Renderer {
         AGLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
         hasTexture = true
         applyViewport()
+    }
+
+    private fun uploadColorLut(lut: FloatArray) {
+        val buf = java.nio.ByteBuffer.allocateDirect(lut.size * 4)
+            .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
+        buf.put(lut).rewind()
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLutTextureId)
+        GLES30.glTexSubImage2D(
+            GLES30.GL_TEXTURE_2D, 0, 0, 0,
+            361, 1, GLES30.GL_RGBA, GLES30.GL_FLOAT, buf,
+        )
     }
 
     /** 이미지 aspect 를 유지하면서 뷰포트를 중앙 정렬 (letterbox). */

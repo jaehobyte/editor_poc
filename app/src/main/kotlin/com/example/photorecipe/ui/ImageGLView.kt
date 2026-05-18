@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.photorecipe.editor.buildColorTuningLut
 import com.example.photorecipe.editor.contrastCurve
 import com.example.photorecipe.editor.saturationMatrix
 import com.example.photorecipe.editor.wbMultipliers
@@ -25,6 +26,8 @@ fun ImageGLView(
     exposureUi: Float = 0f,
     highlightsUi: Float = 0f,
     shadowsUi: Float = 0f,
+    colorTuningParams21: FloatArray? = null,
+    colorTuningOn: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val renderer = remember { ImageRenderer() }
@@ -45,6 +48,8 @@ fun ImageGLView(
             renderer.setTintUi(tintUi)
             renderer.setSaturationMatrix(saturationMatrix(saturationUi))
             renderer.setLumaParams(brightnessUi, exposureUi, highlightsUi, shadowsUi)
+            val lut = colorTuningParams21?.let { buildColorTuningLut(it) }
+            renderer.setColorTuning(colorTuningOn, lut)
             view.requestRender()
         },
     )
