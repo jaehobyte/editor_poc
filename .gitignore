@@ -21,6 +21,9 @@ Thumbs.db
 # Large model files (manage manually or via Git LFS)
 *.tflite
 
+# Release keystore (NEVER commit)
+*.jks
+
 # Logs
 *.log
 

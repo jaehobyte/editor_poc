@@ -2,15 +2,21 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.firebase.appdistribution)
 }
 
-// .env 의 GEMINI_KEY 를 BuildConfig 로 주입. 파일이 없거나 키가 없으면 빈 문자열.
-val geminiKey: String = rootProject.file(".env").takeIf { it.exists() }
+// .env 에서 키-값 읽기. 파일이 없거나 키가 없으면 빈 문자열.
+fun envValue(key: String): String = rootProject.file(".env").takeIf { it.exists() }
     ?.readLines()
-    ?.firstOrNull { it.trim().startsWith("GEMINI_KEY=") }
+    ?.firstOrNull { it.trim().startsWith("$key=") }
     ?.substringAfter("=")
     ?.trim()
     ?: ""
+
+val geminiKey: String = envValue("GEMINI_KEY")
+val releaseStorePassword: String = envValue("KEYSTORE_PASSWORD")
+val releaseKeyAlias: String = envValue("KEY_ALIAS")
+val releaseKeyPassword: String = envValue("KEY_PASSWORD")
 
 android {
     namespace = "com.example.photorecipe"
@@ -26,6 +32,15 @@ android {
         buildConfigField("String", "GEMINI_KEY", "\"$geminiKey\"")
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("release.jks")
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -33,6 +48,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
+            firebaseAppDistribution {
+                appId = "1:722817793573:android:dff652c05a940bc88409cc"
+                artifactType = "APK"
+                groups = "internal"
+            }
         }
     }
 

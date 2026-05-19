@@ -2,44 +2,33 @@ package com.example.photorecipe
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.SystemBarStyle
 import android.graphics.Color as AndroidColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
 import com.example.photorecipe.gemini.GeminiImageClient
 import com.example.photorecipe.tflite.RecipeGenerator
-import com.example.photorecipe.ui.PickerScreen
-import com.example.photorecipe.ui.EditorScreen
+import com.example.photorecipe.ui.AppRoute
+import com.example.photorecipe.ui.HomeScreen
+import com.example.photorecipe.ui.PhotoRecipeFlow
 import com.example.photorecipe.ui.theme.NewCamTheme
 import com.example.photorecipe.ui.theme.PhotoColors
-import com.example.photorecipe.util.decodeBitmapWithOrientation
-import com.example.photorecipe.util.downscaleForGL
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 모든 API 버전에서 edge-to-edge 일관화. 시스템바를 어둡게(라이트 아이콘) 처리.
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -55,113 +44,32 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * 최상위 라우터: Home(비눗방울) ↔ Feature.
+ *
+ * RecipeGenerator / GeminiImageClient 은 여기서 한 번 만들어서 보관 — feature
+ * 진입/이탈 사이에 300MB 모델 재로딩이 일어나지 않도록.
+ */
 @Composable
 private fun AppRoot(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val generator = remember { RecipeGenerator(context) }
     val gemini = remember { GeminiImageClient(BuildConfig.GEMINI_KEY) }
 
-    val pick = remember { PickState() }
-    val params = remember { EditorParams() }
-
-    var phase by remember { mutableStateOf<AppPhase>(AppPhase.Picker) }
-    var generating by remember { mutableStateOf(false) }
-    var stylizing by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(Unit) {
-        // RecipeGenerator 는 Activity 라이프사이클 동안 유지.
-    }
+    var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
 
     Box(modifier = modifier.background(PhotoColors.RunwayBlack)) {
-        when (val p = phase) {
-            AppPhase.Picker -> PickerScreen(
-                referenceUri = pick.reference,
-                inputUri = pick.input,
-                isGenerating = generating,
-                isStylizing = stylizing,
-                onPickReference = { pick.reference = it },
-                onPickInput = { pick.input = it },
-                onGenerate = {
-                    val refUri = pick.reference ?: return@PickerScreen
-                    val inUri = pick.input ?: return@PickerScreen
-                    generating = true
-                    errorMessage = null
-                    scope.launch {
-                        runCatching {
-                            withContext(Dispatchers.IO) {
-                                val refBmp = decodeBitmapWithOrientation(context, refUri)
-                                val inBmp = decodeBitmapWithOrientation(context, inUri)
-                                // 데모와 동일: content (편집 대상) 가 args_0, reference 가 args_1.
-                                val inferred = generator.infer(content = inBmp, reference = refBmp)
-                                inferred to downscaleForGL(inBmp)
-                            }
-                        }.fold(
-                            onSuccess = { (inferred, downBmp) ->
-                                params.reset()
-                                phase = AppPhase.Editing(downBmp, inUri, inferred)
-                            },
-                            onFailure = { errorMessage = it.message ?: "Inference failed" },
-                        )
-                        generating = false
-                    }
-                },
-                onStylizeAndGenerate = {
-                    val refUri = pick.reference ?: return@PickerScreen
-                    val inUri = pick.input ?: return@PickerScreen
-                    stylizing = true
-                    errorMessage = null
-                    scope.launch {
-                        runCatching {
-                            withContext(Dispatchers.IO) {
-                                val refBmp = decodeBitmapWithOrientation(context, refUri)
-                                val inBmp = decodeBitmapWithOrientation(context, inUri)
-                                // 1단계: Gemini 가 reference 의 룩을 content 에 입혀 새 이미지 생성
-                                val stylized = gemini.stylize(reference = refBmp, content = inBmp)
-                                // 2단계: stylized 를 reference 로, 원본 input 을 content 로 추론
-                                val inferred = generator.infer(content = inBmp, reference = stylized)
-                                Triple(inferred, downscaleForGL(inBmp), stylized)
-                            }
-                        }.fold(
-                            onSuccess = { (inferred, downBmp, stylized) ->
-                                params.reset()
-                                phase = AppPhase.Editing(downBmp, inUri, inferred, stylizedReference = stylized)
-                            },
-                            onFailure = { errorMessage = it.message ?: "Stylize failed" },
-                        )
-                        stylizing = false
-                    }
-                },
-            )
-            is AppPhase.Editing -> EditorScreen(
-                inputBitmap = p.inputBitmap,
-                inputUri = p.inputUri,
-                inferred = p.params,
-                params = params,
-                stylizedReference = p.stylizedReference,
-                onBack = { phase = AppPhase.Picker },
-            )
-        }
-        if (generating || stylizing) {
-            Box(
-                modifier = Modifier.fillMaxSize().background(PhotoColors.RunwayBlack.copy(alpha = 0.7f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(color = PhotoColors.PureWhite)
-            }
-        }
-        errorMessage?.let { msg ->
-            Box(
+        when (route) {
+            AppRoute.Home -> HomeScreen(
+                onPick = { route = it },
                 modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.BottomCenter,
-            ) {
-                Text(
-                    text = msg,
-                    color = PhotoColors.PureWhite,
-                    modifier = Modifier.padding(24.dp),
-                )
-            }
+            )
+            AppRoute.PhotoRecipe -> PhotoRecipeFlow(
+                generator = generator,
+                gemini = gemini,
+                onExit = { route = AppRoute.Home },
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }

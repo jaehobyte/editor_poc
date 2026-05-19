@@ -9,6 +9,7 @@ tflite = "2.16.1"
 junit = "4.13.2"
 coil = "2.7.0"
 okhttp = "4.12.0"
+firebaseAppDistribution = "5.0.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -30,3 +31,4 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+firebase-appdistribution = { id = "com.google.firebase.appdistribution", version.ref = "firebaseAppDistribution" }
