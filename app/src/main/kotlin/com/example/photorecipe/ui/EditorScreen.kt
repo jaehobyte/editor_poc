@@ -1,9 +1,12 @@
 package com.example.photorecipe.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -23,6 +26,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Compare
@@ -70,6 +74,7 @@ fun EditorScreen(
     params: EditorParams,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    stylizedReference: Bitmap? = null,
 ) {
     val scope = rememberCoroutineScope()
     var animJob: Job? by remember { mutableStateOf(null) }
@@ -79,6 +84,13 @@ fun EditorScreen(
     // 초기 진입 시 자동으로 1회 애니메이션 적용 — "magic moment".
     LaunchedEffect(Unit) {
         animJob = scope.launch { runRecipeAnimation(params, inferred) }
+    }
+
+    // 시스템 뒤로가기 (제스처/하드웨어) → Picker 로 복귀.
+    // PickState 는 MainActivity 의 remember 로 유지되므로 Reference/Input 그대로 표시됨.
+    BackHandler {
+        animJob?.cancel()
+        onBack()
     }
 
     Column(
@@ -138,6 +150,15 @@ fun EditorScreen(
             if (showOriginal) {
                 CompareBadge()
             }
+            // Gemini 가 생성한 stylized reference 가 있으면 우상단에 작은 썸네일.
+            if (stylizedReference != null) {
+                StylizedThumbnail(
+                    bitmap = stylizedReference,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp),
+                )
+            }
         }
 
         EditorControls(
@@ -186,6 +207,34 @@ private fun TopBar(onBack: () -> Unit, onReplay: () -> Unit, onReset: () -> Unit
 private fun TopIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
     IconButton(onClick = onClick) {
         Icon(imageVector = icon, contentDescription = label, tint = PhotoColors.PureWhite)
+    }
+}
+
+@Composable
+private fun StylizedThumbnail(bitmap: Bitmap, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.End,
+    ) {
+        Text(
+            text = "AI REFERENCE",
+            color = PhotoColors.PureWhite,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier
+                .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(50))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
+        Spacer(Modifier.size(4.dp))
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Stylized reference from Gemini",
+            modifier = Modifier
+                .size(96.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .border(1.dp, PhotoColors.PureWhite.copy(alpha = 0.4f), RoundedCornerShape(12.dp)),
+        )
     }
 }
 

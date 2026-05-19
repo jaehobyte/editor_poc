@@ -49,7 +49,12 @@ class EditorParams {
 /** 픽업/추론/편집 단계를 표현하는 화면 상태. */
 sealed interface AppPhase {
     data object Picker : AppPhase
-    data class Editing(val inputBitmap: Bitmap, val params: FloatArray) : AppPhase
+    data class Editing(
+        val inputBitmap: Bitmap,
+        val params: FloatArray,
+        /** Gemini Nano Banana 가 만들어준 reference 이미지. null = 일반 추론 흐름. */
+        val stylizedReference: Bitmap? = null,
+    ) : AppPhase
 }
 
 /** Picker 화면의 양쪽 슬롯. */

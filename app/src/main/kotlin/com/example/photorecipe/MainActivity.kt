@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.example.photorecipe.gemini.GeminiImageClient
 import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.PickerScreen
 import com.example.photorecipe.ui.EditorScreen
@@ -51,12 +52,14 @@ private fun AppRoot(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val generator = remember { RecipeGenerator(context) }
+    val gemini = remember { GeminiImageClient(BuildConfig.GEMINI_KEY) }
 
     val pick = remember { PickState() }
     val params = remember { EditorParams() }
 
     var phase by remember { mutableStateOf<AppPhase>(AppPhase.Picker) }
     var generating by remember { mutableStateOf(false) }
+    var stylizing by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
@@ -69,6 +72,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                 referenceUri = pick.reference,
                 inputUri = pick.input,
                 isGenerating = generating,
+                isStylizing = stylizing,
                 onPickReference = { pick.reference = it },
                 onPickInput = { pick.input = it },
                 onGenerate = {
@@ -99,15 +103,46 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                         generating = false
                     }
                 },
+                onStylizeAndGenerate = {
+                    val refUri = pick.reference ?: return@PickerScreen
+                    val inUri = pick.input ?: return@PickerScreen
+                    stylizing = true
+                    errorMessage = null
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                val refBmp = context.contentResolver.openInputStream(refUri)!!.use {
+                                    BitmapFactory.decodeStream(it)
+                                }
+                                val inBmp = context.contentResolver.openInputStream(inUri)!!.use {
+                                    BitmapFactory.decodeStream(it)
+                                }
+                                // 1단계: Gemini 가 reference 의 룩을 content 에 입혀 새 이미지 생성
+                                val stylized = gemini.stylize(reference = refBmp, content = inBmp)
+                                // 2단계: stylized 를 reference 로, 원본 input 을 content 로 추론
+                                val inferred = generator.infer(content = inBmp, reference = stylized)
+                                Triple(inferred, downscaleForGL(inBmp), stylized)
+                            }
+                        }.fold(
+                            onSuccess = { (inferred, downBmp, stylized) ->
+                                params.reset()
+                                phase = AppPhase.Editing(downBmp, inferred, stylizedReference = stylized)
+                            },
+                            onFailure = { errorMessage = it.message ?: "Stylize failed" },
+                        )
+                        stylizing = false
+                    }
+                },
             )
             is AppPhase.Editing -> EditorScreen(
                 inputBitmap = p.inputBitmap,
                 inferred = p.params,
                 params = params,
+                stylizedReference = p.stylizedReference,
                 onBack = { phase = AppPhase.Picker },
             )
         }
-        if (generating) {
+        if (generating || stylizing) {
             Box(
                 modifier = Modifier.fillMaxSize().background(PhotoColors.RunwayBlack.copy(alpha = 0.7f)),
                 contentAlignment = Alignment.Center,

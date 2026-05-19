@@ -4,6 +4,14 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// .env 의 GEMINI_KEY 를 BuildConfig 로 주입. 파일이 없거나 키가 없으면 빈 문자열.
+val geminiKey: String = rootProject.file(".env").takeIf { it.exists() }
+    ?.readLines()
+    ?.firstOrNull { it.trim().startsWith("GEMINI_KEY=") }
+    ?.substringAfter("=")
+    ?.trim()
+    ?: ""
+
 android {
     namespace = "com.example.photorecipe"
     compileSdk = 35
@@ -14,6 +22,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        buildConfigField("String", "GEMINI_KEY", "\"$geminiKey\"")
     }
 
     buildTypes {
@@ -37,6 +47,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     androidResources {
@@ -68,6 +79,7 @@ dependencies {
 
     implementation(libs.tensorflow.lite)
     implementation(libs.coil.compose)
+    implementation(libs.okhttp)
 
     debugImplementation(libs.androidx.ui.tooling)
 

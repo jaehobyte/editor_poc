@@ -53,9 +53,11 @@ fun PickerScreen(
     referenceUri: Uri?,
     inputUri: Uri?,
     isGenerating: Boolean,
+    isStylizing: Boolean,
     onPickReference: (Uri) -> Unit,
     onPickInput: (Uri) -> Unit,
     onGenerate: () -> Unit,
+    onStylizeAndGenerate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val pickRef = rememberLauncherForActivityResult(
@@ -106,9 +108,12 @@ fun PickerScreen(
 
         Spacer(Modifier.weight(1f))
 
+        val busy = isGenerating || isStylizing
+        val ready = referenceUri != null && inputUri != null
+
         Button(
             onClick = onGenerate,
-            enabled = referenceUri != null && inputUri != null && !isGenerating,
+            enabled = ready && !busy,
             colors = ButtonDefaults.buttonColors(
                 containerColor = PhotoColors.PureWhite,
                 contentColor = PhotoColors.RunwayBlack,
@@ -121,6 +126,29 @@ fun PickerScreen(
         ) {
             Text(
                 text = if (isGenerating) "Generating…" else "Generate recipe",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        // 보조 CTA: Gemini Nano Banana 로 stylized 이미지를 reference 로 사용.
+        Button(
+            onClick = onStylizeAndGenerate,
+            enabled = ready && !busy,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = PhotoColors.DarkSurface,
+                contentColor = PhotoColors.PureWhite,
+                disabledContainerColor = PhotoColors.DeepBlack,
+                disabledContentColor = PhotoColors.MidSlate,
+            ),
+            shape = RoundedCornerShape(50),
+            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = when {
+                    isStylizing -> "Stylizing with Gemini…"
+                    else -> "Generate stylized image and recipe"
+                },
                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
             )
         }
