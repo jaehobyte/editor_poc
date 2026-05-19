@@ -6,8 +6,7 @@ import androidx.compose.ui.graphics.Color
 sealed interface AppRoute {
     data object Home : AppRoute
     data object PhotoRecipe : AppRoute
-    // 향후 feature 들은 여기에 추가:
-    //   data object MyNewFeature : AppRoute
+    data object CameraGen : AppRoute
 }
 
 /** Home 화면에 비눗방울로 띄울 feature 메타데이터. */
@@ -31,6 +30,16 @@ val FEATURES: List<FeatureCard> = listOf(
             Color(0xFFFFD27A),
             Color(0xFFFF6B6B),
             Color(0xFFB26BFF),
+        ),
+    ),
+    FeatureCard(
+        route = AppRoute.CameraGen,
+        name = "Camera\nPrompt",
+        subtitle = "Shoot, ask, generate",
+        gradient = listOf(
+            Color(0xFF6BE3FF),
+            Color(0xFF6B7BFF),
+            Color(0xFF9D6BFF),
         ),
     ),
 )

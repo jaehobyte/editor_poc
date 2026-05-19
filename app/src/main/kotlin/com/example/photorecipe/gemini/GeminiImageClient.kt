@@ -60,6 +60,50 @@ class GeminiImageClient(private val apiKey: String) {
         }
     }
 
+    /**
+     * 사용자 프롬프트 + 한 장의 이미지로 새 이미지 생성. (Camera-Generative 시나리오)
+     *
+     * @param image 사용자가 카메라로 막 찍은 이미지
+     * @param prompt 자유 형식 프롬프트 (예: "매칭률 높은 데이팅 프로필 사진으로 만들어줘")
+     */
+    suspend fun generate(image: Bitmap, prompt: String): Bitmap = withContext(Dispatchers.IO) {
+        check(apiKey.isNotBlank()) { "GEMINI_KEY is missing — populate .env and rebuild" }
+        require(prompt.isNotBlank()) { "prompt must not be blank" }
+
+        val b64 = bitmapToJpegBase64(image)
+        val body = buildSingleImageRequestBody(prompt, b64)
+        val req = Request.Builder()
+            .url("$ENDPOINT?key=$apiKey")
+            .post(body.toRequestBody(JSON))
+            .build()
+
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                error("Gemini API error ${resp.code}: ${text.take(500)}")
+            }
+            extractImage(text) ?: error("Gemini response had no image. Body: ${text.take(500)}")
+        }
+    }
+
+    private fun buildSingleImageRequestBody(prompt: String, imageB64: String): String {
+        val parts = JSONArray().apply {
+            put(JSONObject().put("text", prompt))
+            put(JSONObject().put("inline_data", JSONObject()
+                .put("mime_type", "image/jpeg")
+                .put("data", imageB64)))
+        }
+        val contents = JSONArray().put(JSONObject().put("parts", parts))
+        val generationConfig = JSONObject().put(
+            "responseModalities",
+            JSONArray().put("TEXT").put("IMAGE"),
+        )
+        return JSONObject()
+            .put("contents", contents)
+            .put("generationConfig", generationConfig)
+            .toString()
+    }
+
     private fun bitmapToJpegBase64(bmp: Bitmap, quality: Int = 90, maxDim: Int = 1024): String {
         val downscaled = downscale(bmp, maxDim)
         val out = ByteArrayOutputStream()
