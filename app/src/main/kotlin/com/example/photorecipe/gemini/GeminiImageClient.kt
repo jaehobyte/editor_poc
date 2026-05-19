@@ -63,15 +63,21 @@ class GeminiImageClient(private val apiKey: String) {
     /**
      * 사용자 프롬프트 + 한 장의 이미지로 새 이미지 생성. (Camera-Generative 시나리오)
      *
-     * @param image 사용자가 카메라로 막 찍은 이미지
-     * @param prompt 자유 형식 프롬프트 (예: "매칭률 높은 데이팅 프로필 사진으로 만들어줘")
+     * 사용자가 입력하는 프롬프트는 "매칭률 높은 데이팅 프로필" 같은 짧은 *의도* 이지
+     * 모델에게 주는 완전한 지시가 아닙니다. 따라서 이 메서드는 사용자 입력을
+     * [GENERATE_INSTRUCTION_TEMPLATE] 로 감싸서 "첨부 이미지를 ~ 스타일로 새로
+     * 생성해줘" 라는 명시적 변환 명령으로 만든 뒤 모델에 보냅니다.
+     *
+     * @param image 사용자가 카메라로 막 찍은 이미지 (변환의 입력)
+     * @param userPrompt 자유 형식 의도 (예: "매칭률 높은 데이팅 프로필")
      */
-    suspend fun generate(image: Bitmap, prompt: String): Bitmap = withContext(Dispatchers.IO) {
+    suspend fun generate(image: Bitmap, userPrompt: String): Bitmap = withContext(Dispatchers.IO) {
         check(apiKey.isNotBlank()) { "GEMINI_KEY is missing — populate .env and rebuild" }
-        require(prompt.isNotBlank()) { "prompt must not be blank" }
+        require(userPrompt.isNotBlank()) { "prompt must not be blank" }
 
+        val wrappedPrompt = GENERATE_INSTRUCTION_TEMPLATE.format(userPrompt.trim())
         val b64 = bitmapToJpegBase64(image)
-        val body = buildSingleImageRequestBody(prompt, b64)
+        val body = buildSingleImageRequestBody(wrappedPrompt, b64)
         val req = Request.Builder()
             .url("$ENDPOINT?key=$apiKey")
             .post(body.toRequestBody(JSON))
@@ -177,5 +183,23 @@ class GeminiImageClient(private val apiKey: String) {
                 "Lightroom 색 보정(color grading)을 적용한 것처럼 input 이미지를 보정해주세요. " +
                 "절대 새로운 장면을 생성하지 말고, input 이미지의 구도·피사체·디테일·텍스처·해상도를 픽셀 단위로 보존하세요. " +
                 "결과물은 input 이미지에 색 보정 필터만 입힌 retouched 사진이어야 합니다."
+
+        /**
+         * Camera-Generative 시나리오용 wrapping. `%s` 자리에 사용자 의도가 들어감.
+         *
+         * 핵심 의도:
+         *  - 첨부 이미지는 "변환의 입력" 임을 명시
+         *  - 사용자 프롬프트는 "원하는 결과의 스타일/연출" 로 해석
+         *  - 인물·주제의 정체성은 유지, 스타일/구도/연출은 변경 허용
+         *  - 텍스트 응답 대신 새 이미지를 반환하도록 압박
+         */
+        const val GENERATE_INSTRUCTION_TEMPLATE: String =
+            "첨부한 이미지를 입력으로 사용해서, 다음 사용자 요청에 맞는 새 이미지를 생성해주세요.\n\n" +
+                "사용자 요청: \"%s\"\n\n" +
+                "지침:\n" +
+                "- 첨부 이미지의 인물 또는 주제의 정체성·핵심 외형 특징은 자연스럽게 유지해주세요.\n" +
+                "- 요청에 맞춰 구도, 표정, 의상, 배경, 조명, 색감, 스타일 등은 자유롭게 재해석해도 됩니다.\n" +
+                "- 결과는 반드시 한 장의 새 이미지로 반환해주세요. 텍스트 설명만 돌려주지 마세요.\n" +
+                "- 사실적인 사진 스타일을 기본으로 하되, 사용자 요청이 일러스트/스케치/회화 같은 다른 양식을 명시하면 그에 따라주세요."
     }
 }

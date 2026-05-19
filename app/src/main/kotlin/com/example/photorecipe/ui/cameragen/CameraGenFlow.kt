@@ -76,7 +76,7 @@ fun CameraGenFlow(
                         scope.launch {
                             runCatching {
                                 withContext(Dispatchers.IO) {
-                                    gemini.generate(image = bitmap, prompt = trimmed)
+                                    gemini.generate(image = bitmap, userPrompt = trimmed)
                                 }
                             }.fold(
                                 onSuccess = { generated ->
