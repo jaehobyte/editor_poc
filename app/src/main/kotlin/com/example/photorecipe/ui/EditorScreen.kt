@@ -1,6 +1,7 @@
 package com.example.photorecipe.ui
 
 import android.graphics.Bitmap
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -65,6 +66,7 @@ import com.example.photorecipe.editor.applyRecipe
 import com.example.photorecipe.editor.colorAnimationFactor
 import com.example.photorecipe.editor.toneAnimationFactor
 import com.example.photorecipe.ui.theme.PhotoColors
+import com.example.photorecipe.util.decodeBitmapForExport
 import com.example.photorecipe.util.saveBitmapToGallery
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
@@ -77,6 +79,7 @@ enum class EditorTab { TONE, COLOR }
 @Composable
 fun EditorScreen(
     inputBitmap: Bitmap,
+    inputUri: Uri,
     inferred: FloatArray,
     params: EditorParams,
     onBack: () -> Unit,
@@ -130,7 +133,10 @@ fun EditorScreen(
                 scope.launch {
                     val result = runCatching {
                         withContext(Dispatchers.IO) {
-                            val rendered = applyRecipe(inputBitmap, params)
+                            // 저장은 원본 해상도(긴 변 ≤ 4096px) 디코딩 후 CPU 렌더.
+                            // 미리보기 비트맵(2048px)을 재사용하면 해상도 손실이 보임.
+                            val full = decodeBitmapForExport(context, inputUri)
+                            val rendered = applyRecipe(full, params)
                             saveBitmapToGallery(context, rendered)
                         }
                     }

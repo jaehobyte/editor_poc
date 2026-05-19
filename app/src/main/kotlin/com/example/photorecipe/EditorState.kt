@@ -50,7 +50,10 @@ class EditorParams {
 sealed interface AppPhase {
     data object Picker : AppPhase
     data class Editing(
+        /** GL 프리뷰용 다운샘플된 비트맵 (긴 변 ≤ 2048px). */
         val inputBitmap: Bitmap,
+        /** 저장 시 원본 해상도 디코딩 (긴 변 ≤ 4096px) 에 사용. */
+        val inputUri: Uri,
         val params: FloatArray,
         /** Gemini Nano Banana 가 만들어준 reference 이미지. null = 일반 추론 흐름. */
         val stylizedReference: Bitmap? = null,

@@ -22,3 +22,26 @@ fun decodeBitmapWithOrientation(context: Context, uri: Uri): Bitmap {
         decoder.isMutableRequired = false
     }
 }
+
+/**
+ * Decode at the original resolution but cap the long side at [maxDim] to avoid
+ * OOM on very high-megapixel inputs. EXIF orientation is applied.
+ */
+fun decodeBitmapForExport(context: Context, uri: Uri, maxDim: Int = 4096): Bitmap {
+    val source = ImageDecoder.createSource(context.contentResolver, uri)
+    return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+        val w = info.size.width
+        val h = info.size.height
+        val long = maxOf(w, h)
+        if (long > maxDim) {
+            val scale = maxDim.toFloat() / long
+            decoder.setTargetSize(
+                (w * scale).toInt().coerceAtLeast(1),
+                (h * scale).toInt().coerceAtLeast(1),
+            )
+        }
+        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        decoder.isMutableRequired = false
+    }
+}
+

@@ -100,7 +100,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                         }.fold(
                             onSuccess = { (inferred, downBmp) ->
                                 params.reset()
-                                phase = AppPhase.Editing(downBmp, inferred)
+                                phase = AppPhase.Editing(downBmp, inUri, inferred)
                             },
                             onFailure = { errorMessage = it.message ?: "Inference failed" },
                         )
@@ -126,7 +126,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                         }.fold(
                             onSuccess = { (inferred, downBmp, stylized) ->
                                 params.reset()
-                                phase = AppPhase.Editing(downBmp, inferred, stylizedReference = stylized)
+                                phase = AppPhase.Editing(downBmp, inUri, inferred, stylizedReference = stylized)
                             },
                             onFailure = { errorMessage = it.message ?: "Stylize failed" },
                         )
@@ -136,6 +136,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
             )
             is AppPhase.Editing -> EditorScreen(
                 inputBitmap = p.inputBitmap,
+                inputUri = p.inputUri,
                 inferred = p.params,
                 params = params,
                 stylizedReference = p.stylizedReference,
