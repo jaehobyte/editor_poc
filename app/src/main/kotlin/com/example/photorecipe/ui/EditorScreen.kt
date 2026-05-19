@@ -53,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
@@ -143,11 +144,14 @@ fun EditorScreen(
         )
 
         // 이미지 영역 — 풀블리드, hold 으로 원본 비교.
+        // `clipToBounds` 로 GL view 가 어떤 사정으로든 영역 밖으로 넘쳐도 상태바 침범 차단.
+        // ImageRenderer 가 letterbox 를 직접 처리하므로 GLSurfaceView 는 fillMaxSize 로 둠.
         val showOriginal = compareDown
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
+                .clipToBounds()
                 .background(PhotoColors.Canvas)
                 .pointerInput(Unit) {
                     detectTapGestures(
@@ -172,9 +176,7 @@ fun EditorScreen(
                 shadowsUi     = if (showOriginal) 0f else params.shadows,
                 colorTuningParams21 = params.colorTuning,
                 colorTuningOn = params.colorTuningEnabled && !showOriginal,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(inputBitmap.width.toFloat() / inputBitmap.height),
+                modifier = Modifier.fillMaxSize(),
             )
             if (showOriginal) {
                 CompareBadge()
