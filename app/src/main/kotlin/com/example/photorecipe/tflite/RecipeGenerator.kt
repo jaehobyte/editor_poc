@@ -11,11 +11,14 @@ import java.nio.channels.FileChannel
 /**
  * TFLite 추론 래퍼. 모델: recipe_generator_v260422.tflite
  *
- * Input  args_0: [1, 3, 224, 224] float32 — Reference 이미지 (CHW, RGB, [0,1] 추정)
- * Input  args_1: [1, 3, 224, 224] float32 — Input 이미지     (CHW, RGB, [0,1] 추정)
- * Output       : [1, 29]          float32 — 보정 파라미터 [-1, 1]
+ * `autographer/photoEditorDemo` 의 `TfliteRecipePredictor` 와 동일한 입출력 규약:
  *
- * 정규화 [0,1]은 추정값. 실제 학습 파이프라인과 일치하는지 결과를 보고 검증 필요.
+ *   Input  args_0 = content   (편집할 이미지)  [1, 3, 224, 224] float32 [0, 1]
+ *   Input  args_1 = reference (룩 참조)         [1, 3, 224, 224] float32 [0, 1]
+ *   Output       = 29 floats [-1, 1] — Galaxy editor parameters
+ *
+ * 전처리: center-crop 정방형 → 224×224 bilinear resize → CHW [0, 1].
+ * ImageNet 정규화는 TFLite 그래프 내부에 포함되어 있어 외부 처리 불필요.
  */
 class RecipeGenerator(context: Context) : AutoCloseable {
 
@@ -31,14 +34,16 @@ class RecipeGenerator(context: Context) : AutoCloseable {
 
     /**
      * 두 비트맵에서 29개 파라미터 추론.
-     * 비트맵 크기는 자유 — 내부에서 224×224로 리사이즈.
+     *
+     * @param content 편집할 이미지 (args_0)
+     * @param reference 참조 룩 이미지 (args_1)
      */
-    fun infer(reference: Bitmap, input: Bitmap): FloatArray {
-        val refTensor = bitmapToChwFloat(reference)
-        val inTensor = bitmapToChwFloat(input)
+    fun infer(content: Bitmap, reference: Bitmap): FloatArray {
+        val contentTensor = bitmapToChwFloat(content)
+        val referenceTensor = bitmapToChwFloat(reference)
 
         val output = Array(1) { FloatArray(NUM_PARAMS) }
-        val inputs = arrayOf<Any>(refTensor, inTensor)
+        val inputs = arrayOf<Any>(contentTensor, referenceTensor)
         val outputs = mutableMapOf<Int, Any>(0 to output)
         interpreter.runForMultipleInputsOutputs(inputs, outputs)
 
@@ -50,31 +55,34 @@ class RecipeGenerator(context: Context) : AutoCloseable {
     }
 
     private fun bitmapToChwFloat(bitmap: Bitmap): ByteBuffer {
-        val resized = if (bitmap.width == IMG_SIZE && bitmap.height == IMG_SIZE) {
-            bitmap
-        } else {
-            Bitmap.createScaledBitmap(bitmap, IMG_SIZE, IMG_SIZE, true)
-        }
+        // 데모와 동일: center-crop 정방형 → 224×224 bilinear resize.
+        // 가로/세로 비율을 보존해야 모델이 학습 분포에 맞는 입력을 받음.
+        val cropped = centerCropSquare(bitmap)
+        val scaled = Bitmap.createScaledBitmap(cropped, IMG_SIZE, IMG_SIZE, true)
 
         val pixels = IntArray(IMG_SIZE * IMG_SIZE)
-        resized.getPixels(pixels, 0, IMG_SIZE, 0, 0, IMG_SIZE, IMG_SIZE)
+        scaled.getPixels(pixels, 0, IMG_SIZE, 0, 0, IMG_SIZE, IMG_SIZE)
 
         val bytes = 1 * 3 * IMG_SIZE * IMG_SIZE * 4
         val buf = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
 
-        // CHW 순서: R 평면 전체 → G 평면 전체 → B 평면 전체
-        for (px in pixels) {
-            buf.putFloat(((px ushr 16) and 0xFF) / 255f)
-        }
-        for (px in pixels) {
-            buf.putFloat(((px ushr 8) and 0xFF) / 255f)
-        }
-        for (px in pixels) {
-            buf.putFloat((px and 0xFF) / 255f)
-        }
+        // CHW: R 평면 전체 → G 평면 전체 → B 평면 전체
+        for (px in pixels) buf.putFloat(((px ushr 16) and 0xFF) / 255f)
+        for (px in pixels) buf.putFloat(((px ushr 8) and 0xFF) / 255f)
+        for (px in pixels) buf.putFloat((px and 0xFF) / 255f)
 
         buf.rewind()
         return buf
+    }
+
+    private fun centerCropSquare(bmp: Bitmap): Bitmap {
+        val w = bmp.width
+        val h = bmp.height
+        if (w == h) return bmp
+        val side = minOf(w, h)
+        val x = (w - side) / 2
+        val y = (h - side) / 2
+        return Bitmap.createBitmap(bmp, x, y, side, side)
     }
 
     private fun loadModelFile(context: Context, path: String): ByteBuffer {

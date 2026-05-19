@@ -85,7 +85,8 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                                 val inBmp = context.contentResolver.openInputStream(inUri)!!.use {
                                     BitmapFactory.decodeStream(it)
                                 }
-                                val inferred = generator.infer(refBmp, inBmp)
+                                // 데모와 동일: content (편집 대상) 가 args_0, reference 가 args_1.
+                                val inferred = generator.infer(content = inBmp, reference = refBmp)
                                 inferred to downscaleForGL(inBmp)
                             }
                         }.fold(
