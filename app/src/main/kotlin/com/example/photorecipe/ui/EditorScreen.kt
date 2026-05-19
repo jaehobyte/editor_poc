@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -423,13 +424,25 @@ private fun ToneControls(p: EditorParams, onUserEdit: () -> Unit) {
 
 @Composable
 private fun ColorControls(p: EditorParams, onUserEdit: () -> Unit) {
+    var selectedColor by remember { mutableStateOf(0) } // 0..6
+    val baseIdx = selectedColor * 3
+
+    fun updateAt(offset: Int): (Float) -> Unit = { v ->
+        onUserEdit()
+        val arr = p.colorTuning.copyOf()
+        arr[baseIdx + offset] = v
+        p.colorTuning = arr
+        // 사용자가 슬라이더를 만지면 색상 튜닝이 자동으로 켜져야 효과가 보임.
+        p.colorTuningEnabled = true
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .height(280.dp)
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -456,19 +469,46 @@ private fun ColorControls(p: EditorParams, onUserEdit: () -> Unit) {
                 ),
             )
         }
+
+        // 7개 색상 칩 — 하나 선택해서 그 색의 H/S/L 을 슬라이더로 조정
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            for (i in 0 until 7) {
+                ColorPickerChip(
+                    color = COLOR_SWATCHES[i],
+                    selected = selectedColor == i,
+                    onClick = { selectedColor = i },
+                )
+            }
+        }
+
         Text(
-            text = "Per-color HSL shifts inferred from the reference. Toggle off to compare against tone-only.",
-            style = MaterialTheme.typography.bodySmall,
-            color = PhotoColors.MidSlate,
+            text = COLOR_NAMES[selectedColor],
+            style = MaterialTheme.typography.titleLarge,
+            color = PhotoColors.PureWhite,
         )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "INFERRED SHIFTS",
-            style = MaterialTheme.typography.labelSmall,
-            color = PhotoColors.CoolSilver,
-        )
-        ColorShiftGrid(p.colorTuning)
+
+        SliderRow("Hue",        p.colorTuning[baseIdx],     updateAt(0))
+        SliderRow("Saturation", p.colorTuning[baseIdx + 1], updateAt(1))
+        SliderRow("Luminance",  p.colorTuning[baseIdx + 2], updateAt(2))
     }
+}
+
+@Composable
+private fun ColorPickerChip(color: Color, selected: Boolean, onClick: () -> Unit) {
+    // 선택된 칩은 흰색 링으로 강조. 미선택은 다크 보더만.
+    val ringColor = if (selected) PhotoColors.PureWhite else PhotoColors.BorderDark
+    val ringWidth = if (selected) 2.dp else 1.dp
+    Box(
+        modifier = Modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .background(color)
+            .border(ringWidth, ringColor, CircleShape)
+            .clickable(onClick = onClick),
+    )
 }
 
 private val COLOR_NAMES = listOf("Red", "Orange", "Yellow", "Green", "Blue", "Navy", "Purple")
@@ -476,68 +516,6 @@ private val COLOR_SWATCHES = listOf(
     Color(0xFFE53935), Color(0xFFFB8C00), Color(0xFFFDD835),
     Color(0xFF43A047), Color(0xFF1E88E5), Color(0xFF3949AB), Color(0xFF8E24AA),
 )
-
-@Composable
-private fun ColorShiftGrid(colorTuning: FloatArray) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        for (i in 0 until 7) {
-            val h = colorTuning[i * 3]
-            val s = colorTuning[i * 3 + 1]
-            val l = colorTuning[i * 3 + 2]
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(12.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(COLOR_SWATCHES[i]),
-                )
-                Spacer(Modifier.size(10.dp))
-                Text(
-                    text = COLOR_NAMES[i],
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = PhotoColors.PureWhite,
-                    modifier = Modifier.widthIn(min = 64.dp),
-                )
-                Spacer(Modifier.weight(1f))
-                NumChip("H", h)
-                Spacer(Modifier.size(4.dp))
-                NumChip("S", s)
-                Spacer(Modifier.size(4.dp))
-                NumChip("L", l)
-            }
-        }
-    }
-}
-
-@Composable
-private fun NumChip(label: String, value: Float) {
-    val muted = kotlin.math.abs(value) < 0.5f
-    val textColor = if (muted) PhotoColors.MidSlate else PhotoColors.PureWhite
-    Row(
-        modifier = Modifier
-            .background(PhotoColors.DarkSurface, RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            color = PhotoColors.MidSlate,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace,
-        )
-        Spacer(Modifier.size(4.dp))
-        Text(
-            text = "%+.0f".format(value),
-            color = textColor,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-    }
-}
 
 @Composable
 private fun SliderRow(label: String, value: Float, onChange: (Float) -> Unit) {
