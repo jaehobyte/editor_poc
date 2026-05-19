@@ -10,16 +10,17 @@ import android.speech.RecognizerIntent
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
+import androidx.camera.core.Camera
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -46,7 +48,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.input.ImeAction
@@ -66,11 +68,6 @@ import com.example.photorecipe.ui.theme.PhotoColors
 
 private const val TAG = "CameraScreen"
 
-/**
- * Camera preview + 프롬프트 입력(텍스트/음성) + 셔터.
- *
- * @param onCapture 셔터 탭 → 회전 보정된 Bitmap 반환.
- */
 @Composable
 fun CameraScreen(
     prompt: String,
@@ -80,9 +77,10 @@ fun CameraScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
-    // 카메라 권한
-    var hasCameraPermission by remember {
+    // 권한
+    var hasCamera by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
                 PackageManager.PERMISSION_GRANTED,
@@ -90,16 +88,14 @@ fun CameraScreen(
     }
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasCameraPermission = granted }
-
+    ) { granted -> hasCamera = granted }
     LaunchedEffect(Unit) {
-        if (!hasCameraPermission) permLauncher.launch(Manifest.permission.CAMERA)
+        if (!hasCamera) permLauncher.launch(Manifest.permission.CAMERA)
     }
 
     Box(modifier = modifier.fillMaxSize().background(PhotoColors.RunwayBlack)) {
-        if (!hasCameraPermission) {
+        if (!hasCamera) {
             PermissionRationale(onRetry = { permLauncher.launch(Manifest.permission.CAMERA) })
-            // 상단 back 만 별도로 노출
             IconButton(
                 onClick = onBack,
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
@@ -109,61 +105,138 @@ fun CameraScreen(
             return@Box
         }
 
-        // ImageCapture use case — Compose 라이프사이클 동안 유지.
-        val imageCapture = remember { ImageCapture.Builder().build() }
-        val lifecycleOwner = LocalLifecycleOwner.current
+        // 카메라 상태
+        var settings by remember { mutableStateOf(CameraSettings()) }
+        var bound by remember { mutableStateOf<Camera?>(null) }
+        var previewView by remember { mutableStateOf<PreviewView?>(null) }
+        val imageCapture = remember {
+            ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build()
+        }
 
-        // 카메라 프리뷰 (풀스크린)
+        // PreviewView 가 준비됐고 lens/portrait 가 바뀔 때마다 rebind.
+        LaunchedEffect(previewView, settings.lens, settings.portraitMode) {
+            val pv = previewView ?: return@LaunchedEffect
+            bound = bindCamera(
+                context = context,
+                lifecycleOwner = lifecycleOwner,
+                previewView = pv,
+                imageCapture = imageCapture,
+                lens = settings.lens,
+                portraitMode = settings.portraitMode,
+            )
+            // bind 직후 현재 설정 즉시 반영
+            bound?.let { applyRuntimeSettings(it, imageCapture, settings) }
+        }
+
+        // 다른 설정 변경은 runtime 적용
+        LaunchedEffect(
+            bound, settings.flash, settings.zoomRatio, settings.evIndex,
+            settings.wb, settings.manualMode, settings.isoIndex, settings.shutterIndex,
+        ) {
+            bound?.let { applyRuntimeSettings(it, imageCapture, settings) }
+        }
+
+        // 줌 / 포커스 인디케이터
+        var showZoomBadge by remember { mutableStateOf(false) }
+        var focusPoint by remember { mutableStateOf<androidx.compose.ui.geometry.Offset?>(null) }
+
+        // 프리뷰 (풀스크린) — 핀치 줌 + 탭 포커스
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(bound) {
+                    val cam = bound ?: return@pointerInput
+                    val info = cam.cameraInfo.zoomState.value
+                    val minZ = info?.minZoomRatio ?: 1f
+                    val maxZ = info?.maxZoomRatio ?: 4f
+                    detectTransformGestures { _, _, zoomChange, _ ->
+                        if (zoomChange == 1f) return@detectTransformGestures
+                        val current = cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f
+                        val next = (current * zoomChange).coerceIn(minZ, maxZ)
+                        settings = settings.copy(zoomRatio = next)
+                        showZoomBadge = true
+                    }
                 }
-                bindCameraToPreview(ctx, previewView, imageCapture, lifecycleOwner)
-                previewView
+                .pointerInput(bound, previewView) {
+                    val cam = bound ?: return@pointerInput
+                    val pv = previewView ?: return@pointerInput
+                    detectTapGestures(
+                        onTap = { offset ->
+                            focusPoint = offset
+                            val factory = pv.meteringPointFactory
+                            val point = factory.createPoint(offset.x, offset.y)
+                            val action = FocusMeteringAction.Builder(point).build()
+                            runCatching { cam.cameraControl.startFocusAndMetering(action) }
+                        },
+                    )
+                },
+            factory = { ctx ->
+                PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    previewView = this
+                }
             },
         )
 
-        // 어두운 상단/하단 grad 영역 위에 컨트롤 배치
-        Column(
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            // 상단 바
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.35f))
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Outlined.ArrowBack, contentDescription = "Back", tint = PhotoColors.PureWhite)
-                }
-                Spacer(Modifier.fillMaxWidth(0.0f))
-                Text(
-                    text = "CAMERA PROMPT",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = PhotoColors.MidSlate,
-                )
+        // 포커스 표시 (탭한 위치에 잠시 원 그리기)
+        focusPoint?.let { offset ->
+            LaunchedEffect(offset) {
+                kotlinx.coroutines.delay(700)
+                focusPoint = null
             }
+            Box(
+                modifier = Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(offset.x.toInt() - 32, offset.y.toInt() - 32) }
+                    .size(64.dp)
+                    .border(2.dp, PhotoColors.PureWhite, CircleShape),
+            )
+        }
+
+        // 줌 배지 (잠시 표시 후 사라짐)
+        if (showZoomBadge) {
+            LaunchedEffect(settings.zoomRatio) {
+                kotlinx.coroutines.delay(1200)
+                showZoomBadge = false
+            }
+            Box(
+                modifier = Modifier.fillMaxSize().padding(top = 80.dp),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                ZoomBadge(ratio = settings.zoomRatio)
+            }
+        }
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            CameraTopBar(
+                settings = settings,
+                onSettingsChange = { settings = it },
+                onBack = onBack,
+            )
 
             Spacer(Modifier.weight(1f))
 
-            // 하단 컨트롤
+            // EV / Manual 컨트롤
+            val evRange = bound?.cameraInfo?.exposureState?.exposureCompensationRange
+                ?.let { it.lower..it.upper }
+                ?: (-6..6)
+            AdvancedControls(
+                settings = settings,
+                onSettingsChange = { settings = it },
+                evRange = evRange,
+            )
+
+            // 프롬프트 + 셔터
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.55f))
+                    .background(Color.Black.copy(alpha = 0.7f))
                     .padding(horizontal = 16.dp, vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                PromptInputRow(
-                    prompt = prompt,
-                    onPromptChange = onPromptChange,
-                )
-
+                PromptInputRow(prompt, onPromptChange)
                 ShutterButton(
                     onTap = {
                         capturePhoto(imageCapture, context) { result ->
@@ -176,6 +249,10 @@ fun CameraScreen(
         }
     }
 }
+
+// ──────────────────────────────────────────────────────────────────
+//  Sub-UI
+// ──────────────────────────────────────────────────────────────────
 
 @Composable
 private fun PromptInputRow(prompt: String, onPromptChange: (String) -> Unit) {
@@ -200,7 +277,7 @@ private fun PromptInputRow(prompt: String, onPromptChange: (String) -> Unit) {
             modifier = Modifier.weight(1f),
             placeholder = {
                 Text(
-                    "어떤 사진을 만들고 싶나요? (예: 매칭률 높은 데이팅 프로필)",
+                    "어떤 사진을 만들고 싶나요?",
                     color = PhotoColors.MidSlate,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -289,33 +366,9 @@ private fun PermissionRationale(onRetry: () -> Unit) {
     }
 }
 
-// ── CameraX 결선 헬퍼 ─────────────────────────────────────────────
-
-private fun bindCameraToPreview(
-    context: android.content.Context,
-    previewView: PreviewView,
-    imageCapture: ImageCapture,
-    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
-) {
-    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-    cameraProviderFuture.addListener({
-        try {
-            val cameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                imageCapture,
-            )
-        } catch (t: Throwable) {
-            Log.e(TAG, "bindCameraToPreview failed", t)
-        }
-    }, ContextCompat.getMainExecutor(context))
-}
+// ──────────────────────────────────────────────────────────────────
+//  Capture
+// ──────────────────────────────────────────────────────────────────
 
 private fun capturePhoto(
     imageCapture: ImageCapture,
