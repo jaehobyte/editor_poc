@@ -187,19 +187,26 @@ class GeminiImageClient(private val apiKey: String) {
         /**
          * Camera-Generative 시나리오용 wrapping. `%s` 자리에 사용자 의도가 들어감.
          *
-         * 핵심 의도:
-         *  - 첨부 이미지는 "변환의 입력" 임을 명시
-         *  - 사용자 프롬프트는 "원하는 결과의 스타일/연출" 로 해석
-         *  - 인물·주제의 정체성은 유지, 스타일/구도/연출은 변경 허용
-         *  - 텍스트 응답 대신 새 이미지를 반환하도록 압박
+         * Nano Banana (Gemini Flash Image) 는 "편집" 의도가 명확할 때 정체성 보존이
+         * 잘 됩니다. 이 템플릿은 작업을 "생성" 이 아닌 "같은 사람의 다른 사진을 만드는
+         * 편집" 으로 명시적으로 프레이밍해서 얼굴이 다른 사람으로 바뀌는 것을 방지.
          */
         const val GENERATE_INSTRUCTION_TEMPLATE: String =
-            "첨부한 이미지를 입력으로 사용해서, 다음 사용자 요청에 맞는 새 이미지를 생성해주세요.\n\n" +
-                "사용자 요청: \"%s\"\n\n" +
-                "지침:\n" +
-                "- 첨부 이미지의 인물 또는 주제의 정체성·핵심 외형 특징은 자연스럽게 유지해주세요.\n" +
-                "- 요청에 맞춰 구도, 표정, 의상, 배경, 조명, 색감, 스타일 등은 자유롭게 재해석해도 됩니다.\n" +
-                "- 결과는 반드시 한 장의 새 이미지로 반환해주세요. 텍스트 설명만 돌려주지 마세요.\n" +
-                "- 사실적인 사진 스타일을 기본으로 하되, 사용자 요청이 일러스트/스케치/회화 같은 다른 양식을 명시하면 그에 따라주세요."
+            "TASK: Edit the attached photograph according to the user's request below. " +
+                "Treat this strictly as a PHOTO EDIT of the SAME person — never generate a different individual.\n\n" +
+                "USER REQUEST: \"%s\"\n\n" +
+                "ABSOLUTE IDENTITY PRESERVATION (highest priority):\n" +
+                "- The person in the output MUST be unmistakably the SAME individual as in the attached photo.\n" +
+                "- Preserve face geometry, eye shape & color, nose shape, lip shape, skin tone, ear shape, " +
+                "hair color & texture, eyebrow shape, age, race, gender, and any moles / scars / freckles / glasses.\n" +
+                "- DO NOT replace the subject with a generic-looking model. DO NOT \"beautify\" by changing features.\n" +
+                "- If you cannot fulfill the request while preserving identity, prioritize identity over the request.\n\n" +
+                "ALLOWED EDITS (within request):\n" +
+                "- Outfit, accessories, background, scene, lighting, color grading, framing, camera angle, " +
+                "pose, expression, hairstyle styling (not changing color/length drastically unless asked).\n\n" +
+                "OUTPUT:\n" +
+                "- Return exactly ONE photorealistic image. Do not return text. Do not return multiple variants.\n" +
+                "- Use a different medium (illustration, anime, painting, sketch) ONLY if the user explicitly requests it.\n" +
+                "- 사용자 요청이 한국어이면 자연스럽게 해석하되 위 정체성 보존 규칙은 절대 우선이다."
     }
 }
