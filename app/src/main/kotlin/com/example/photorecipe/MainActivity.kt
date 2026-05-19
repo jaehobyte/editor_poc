@@ -1,6 +1,5 @@
 package com.example.photorecipe
 
-import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -31,6 +30,7 @@ import com.example.photorecipe.ui.PickerScreen
 import com.example.photorecipe.ui.EditorScreen
 import com.example.photorecipe.ui.theme.NewCamTheme
 import com.example.photorecipe.ui.theme.PhotoColors
+import com.example.photorecipe.util.decodeBitmapWithOrientation
 import com.example.photorecipe.util.downscaleForGL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -91,12 +91,8 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                     scope.launch {
                         runCatching {
                             withContext(Dispatchers.IO) {
-                                val refBmp = context.contentResolver.openInputStream(refUri)!!.use {
-                                    BitmapFactory.decodeStream(it)
-                                }
-                                val inBmp = context.contentResolver.openInputStream(inUri)!!.use {
-                                    BitmapFactory.decodeStream(it)
-                                }
+                                val refBmp = decodeBitmapWithOrientation(context, refUri)
+                                val inBmp = decodeBitmapWithOrientation(context, inUri)
                                 // 데모와 동일: content (편집 대상) 가 args_0, reference 가 args_1.
                                 val inferred = generator.infer(content = inBmp, reference = refBmp)
                                 inferred to downscaleForGL(inBmp)
@@ -119,12 +115,8 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                     scope.launch {
                         runCatching {
                             withContext(Dispatchers.IO) {
-                                val refBmp = context.contentResolver.openInputStream(refUri)!!.use {
-                                    BitmapFactory.decodeStream(it)
-                                }
-                                val inBmp = context.contentResolver.openInputStream(inUri)!!.use {
-                                    BitmapFactory.decodeStream(it)
-                                }
+                                val refBmp = decodeBitmapWithOrientation(context, refUri)
+                                val inBmp = decodeBitmapWithOrientation(context, inUri)
                                 // 1단계: Gemini 가 reference 의 룩을 content 에 입혀 새 이미지 생성
                                 val stylized = gemini.stylize(reference = refBmp, content = inBmp)
                                 // 2단계: stylized 를 reference 로, 원본 input 을 content 로 추론
