@@ -124,7 +124,7 @@ class GeminiImageClient(private val apiKey: String) {
 
     companion object {
         private const val ENDPOINT =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent"
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         const val DEFAULT_PROMPT =
