@@ -128,8 +128,10 @@ class GeminiImageClient(private val apiKey: String) {
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         const val DEFAULT_PROMPT =
-            "첫 번째 이미지는 reference, 두 번째 이미지는 input입니다. " +
-                "reference 이미지의 스타일/색감/룩을 input 이미지에 적용한 새 이미지를 생성해주세요. " +
-                "구도와 피사체는 input 이미지의 것을 그대로 유지하고, 톤과 색감만 reference 처럼 만들어주세요."
+            "첫 번째 이미지는 reference(색감 참조용), 두 번째 이미지는 input(보정 대상)입니다. " +
+                "input 이미지를 그대로 유지한 채, reference의 색온도·틴트·노출·대비·채도·톤 곡선만 분석해서 " +
+                "Lightroom 색 보정(color grading)을 적용한 것처럼 input 이미지를 보정해주세요. " +
+                "절대 새로운 장면을 생성하지 말고, input 이미지의 구도·피사체·디테일·텍스처·해상도를 픽셀 단위로 보존하세요. " +
+                "결과물은 input 이미지에 색 보정 필터만 입힌 retouched 사진이어야 합니다."
     }
 }
