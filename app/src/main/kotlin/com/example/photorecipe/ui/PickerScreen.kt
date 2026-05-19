@@ -75,7 +75,7 @@ fun PickerScreen(
     ) {
         Spacer(Modifier.height(64.dp))
         Text(
-            text = "newCam",
+            text = "Photo Recipe\nGenerator",
             style = MaterialTheme.typography.displayLarge,
             color = PhotoColors.PureWhite,
         )

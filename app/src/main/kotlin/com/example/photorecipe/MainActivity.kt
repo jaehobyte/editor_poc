@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             NewCamTheme {
                 Scaffold(containerColor = PhotoColors.RunwayBlack) { padding ->
-                    AppRoot(modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()))
+                    AppRoot(modifier = Modifier.fillMaxSize().padding(padding))
                 }
             }
         }

@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Compare
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Replay
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Tune
@@ -59,11 +60,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.photorecipe.EditorParams
+import com.example.photorecipe.editor.applyRecipe
 import com.example.photorecipe.editor.colorAnimationFactor
 import com.example.photorecipe.editor.toneAnimationFactor
 import com.example.photorecipe.ui.theme.PhotoColors
+import com.example.photorecipe.util.saveBitmapToGallery
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class EditorTab { TONE, COLOR }
 
@@ -77,9 +83,12 @@ fun EditorScreen(
     stylizedReference: Bitmap? = null,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var animJob: Job? by remember { mutableStateOf(null) }
     var compareDown by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(EditorTab.TONE) }
+    var saving by remember { mutableStateOf(false) }
+    var savedToast by remember { mutableStateOf<String?>(null) }
 
     // 초기 진입 시 자동으로 1회 애니메이션 적용 — "magic moment".
     LaunchedEffect(Unit) {
@@ -110,6 +119,26 @@ fun EditorScreen(
             onReset = {
                 animJob?.cancel()
                 params.reset()
+            },
+            saving = saving,
+            onSave = {
+                if (saving) return@TopBar
+                animJob?.cancel()
+                saving = true
+                savedToast = null
+                scope.launch {
+                    val result = runCatching {
+                        withContext(Dispatchers.IO) {
+                            val rendered = applyRecipe(inputBitmap, params)
+                            saveBitmapToGallery(context, rendered)
+                        }
+                    }
+                    saving = false
+                    savedToast = result.fold(
+                        onSuccess = { "Saved to gallery (Pictures/PhotoRecipe)" },
+                        onFailure = { "Save failed: ${it.message}" },
+                    )
+                }
             },
         )
 
@@ -168,6 +197,29 @@ fun EditorScreen(
             onUserEdit = { animJob?.cancel() },
         )
     }
+
+    savedToast?.let { msg ->
+        // 짧게 보이고 자동으로 사라지는 인라인 토스트
+        LaunchedEffect(msg) {
+            kotlinx.coroutines.delay(3000)
+            savedToast = null
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 32.dp),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            Text(
+                text = msg,
+                color = PhotoColors.PureWhite,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .background(PhotoColors.DarkSurface, androidx.compose.foundation.shape.RoundedCornerShape(50))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+    }
 }
 
 private suspend fun runRecipeAnimation(params: EditorParams, inferred: FloatArray) {
@@ -183,7 +235,13 @@ private suspend fun runRecipeAnimation(params: EditorParams, inferred: FloatArra
 }
 
 @Composable
-private fun TopBar(onBack: () -> Unit, onReplay: () -> Unit, onReset: () -> Unit) {
+private fun TopBar(
+    onBack: () -> Unit,
+    onReplay: () -> Unit,
+    onReset: () -> Unit,
+    saving: Boolean,
+    onSave: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -193,13 +251,14 @@ private fun TopBar(onBack: () -> Unit, onReplay: () -> Unit, onReset: () -> Unit
         TopIcon(icon = Icons.Outlined.ArrowBack, label = "Back", onClick = onBack)
         Spacer(Modifier.weight(1f))
         Text(
-            text = "EDITING",
+            text = if (saving) "SAVING…" else "EDITING",
             style = MaterialTheme.typography.labelSmall,
             color = PhotoColors.MidSlate,
         )
         Spacer(Modifier.weight(1f))
         TopIcon(icon = Icons.Outlined.RestartAlt, label = "Reset", onClick = onReset)
         TopIcon(icon = Icons.Outlined.Replay, label = "Replay", onClick = onReplay)
+        TopIcon(icon = Icons.Outlined.Download, label = "Save", onClick = onSave)
     }
 }
 
