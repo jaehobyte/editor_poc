@@ -61,9 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -234,8 +232,9 @@ fun PhotoEditorScreen(
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // 선택된 마스크의 영역을 색 오버레이로 표시. 생성 직후엔 살짝 더 진하게
-            // (flash), 잠시 후 옅어져서 보정 결과를 가리지 않도록.
+            // Lightroom 식 "활성 마스크 포커스": 마스크 *바깥* (원본 영역) 을 어둡게 깔아서
+            // 어느 부분이 편집 대상인지 한눈에 보이게 한다. 마스크 안쪽은 투명이라
+            // 슬라이더로 바뀌는 결과가 그대로 노출됨.
             activeMask?.let { m ->
                 var flashing by remember(m.id) { mutableStateOf(true) }
                 LaunchedEffect(m.id) {
@@ -243,19 +242,18 @@ fun PhotoEditorScreen(
                     delay(700)
                     flashing = false
                 }
-                val overlayAlpha by animateFloatAsState(
-                    targetValue = if (flashing) 0.55f else 0.22f,
+                val dimStrength by animateFloatAsState(
+                    targetValue = if (flashing) 1.0f else 0.65f,
                     animationSpec = tween(durationMillis = 700),
-                    label = "mask-overlay-alpha",
+                    label = "mask-dim-strength",
                 )
                 Image(
-                    bitmap = m.alphaBitmap.asImageBitmap(),
-                    contentDescription = "Selected mask region",
+                    bitmap = m.dimOverlayBitmap.asImageBitmap(),
+                    contentDescription = "Inactive area dimmed",
                     contentScale = ContentScale.Fit,
-                    colorFilter = ColorFilter.tint(Color(0xFFFF8A3D), BlendMode.SrcIn),
                     modifier = Modifier
                         .fillMaxSize()
-                        .alpha(overlayAlpha),
+                        .alpha(dimStrength),
                 )
             }
 
