@@ -46,6 +46,23 @@ data class VibeResponse(
     val message: String? = null,
 )
 
+/**
+ * Multi-turn 대화의 한 항목. 모델에게 "직전 turn 에 어떤 요청과 결과가 있었는지"
+ * 를 텍스트로 알려주는 용도. functionCall/functionResponse 구조 대신 단순 텍스트
+ * 요약을 쓰는 이유: Gemini 의 tool 프로토콜 quirks (특히 functionResponse 매칭
+ * 누락 시 5xx) 를 피하고, 어차피 system prompt 에 "current values" 가 다 박혀
+ * 있어서 의미 손실이 거의 없음.
+ */
+data class VibeTurn(
+    /** 사용자가 입력한 원문 (예: "하늘 좀 더 따뜻하게"). */
+    val userPrompt: String,
+    /**
+     * 모델 응답 요약 — 적용된 edit 들의 인간이 읽을 수 있는 요약, 또는 거부
+     * 텍스트. 예: "applied: sky temperature=25" / "refused: too vague".
+     */
+    val summary: String,
+)
+
 class VibeClient(private val apiKey: String) {
 
     private val http = OkHttpClient.Builder()
@@ -58,12 +75,13 @@ class VibeClient(private val apiKey: String) {
         userPrompt: String,
         availableTargets: List<String>,
         currentValues: Map<String, EditorParams>,
+        history: List<VibeTurn> = emptyList(),
     ): VibeResponse = withContext(Dispatchers.IO) {
         check(apiKey.isNotBlank()) { "GEMINI_KEY is missing — populate .env and rebuild" }
         require(userPrompt.isNotBlank()) { "prompt must not be blank" }
         require(availableTargets.isNotEmpty()) { "must offer at least one target (e.g. 'global')" }
 
-        val body = buildRequestBody(userPrompt, availableTargets, currentValues)
+        val body = buildRequestBody(userPrompt, availableTargets, currentValues, history)
         val req = Request.Builder()
             .url("$ENDPOINT?key=$apiKey")
             .post(body.toRequestBody(JSON))
@@ -82,11 +100,28 @@ class VibeClient(private val apiKey: String) {
         userPrompt: String,
         targets: List<String>,
         state: Map<String, EditorParams>,
+        history: List<VibeTurn>,
     ): String {
         val systemInstruction = JSONObject().put(
             "parts", JSONArray().put(JSONObject().put("text", buildSystemPrompt(targets, state))),
         )
-        val contents = JSONArray().put(
+        // 최근 turn 들을 user/model 텍스트 페어로 풀어서 contents 에 펼침.
+        // 마지막에 새 user 메시지를 붙임. 모델은 이 흐름을 보고 "조금 더" / "취소"
+        // 같은 후속 명령의 reference 를 직전 model summary 에서 찾을 수 있음.
+        val contents = JSONArray()
+        for (turn in history) {
+            contents.put(
+                JSONObject()
+                    .put("role", "user")
+                    .put("parts", JSONArray().put(JSONObject().put("text", turn.userPrompt))),
+            )
+            contents.put(
+                JSONObject()
+                    .put("role", "model")
+                    .put("parts", JSONArray().put(JSONObject().put("text", turn.summary))),
+            )
+        }
+        contents.put(
             JSONObject()
                 .put("role", "user")
                 .put("parts", JSONArray().put(JSONObject().put("text", userPrompt))),
@@ -192,6 +227,18 @@ class VibeClient(private val apiKey: String) {
         appendLine("- Magnitudes: 살짝/slightly = ±10..±15, default = ±20..±35, 많이/strongly = ±40..±60, 극단 = ±70..")
         appendLine("- You may call apply_edit multiple times if the request mentions multiple regions.")
         appendLine("- If the user request is too vague to act on, call apply_edit with target='global' and small reasonable defaults.")
+        appendLine()
+
+        // ── Multi-turn / follow-up handling ────────────────────────────
+        appendLine("FOLLOW-UP COMMANDS (multi-turn):")
+        appendLine("The contents array shows the recent conversation — alternating user prompts and your previous response summaries.")
+        appendLine("The user may issue a *follow-up* referring to the previous turn rather than a fresh request:")
+        appendLine("- '조금 더' / 'a bit more' / '더' → extend the SAME axis on the SAME target as your last response, pushing it further in the same direction. Compute new absolute value = current value + a small extra step (e.g. +10).")
+        appendLine("- '덜' / '조금만' / 'less' → pull the last-changed axis back toward 0, but not to 0 (e.g. halve the distance from 0).")
+        appendLine("- '취소' / 'undo' / '되돌려' → revert the last turn: emit apply_edit on the same target setting the changed axes back toward their PRE-turn value. If unknown, set to 0.")
+        appendLine("- '다시' / '같은 거 다른 곳에' → apply your last response's axes/magnitudes to a different target the user names now.")
+        appendLine("- '계속' / 'continue' on an open-ended request → progress the same direction further than last turn.")
+        appendLine("When a follow-up is ambiguous, infer from CURRENT VALUES which axis was most recently moved (largest delta from 0 on the relevant target) and act on it.")
     }
 
     private fun describeNonZeroColorTuning(arr: FloatArray): String {

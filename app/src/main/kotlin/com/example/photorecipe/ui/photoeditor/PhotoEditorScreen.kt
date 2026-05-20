@@ -83,6 +83,7 @@ import com.example.photorecipe.util.decodeBitmapForExport
 import com.example.photorecipe.util.saveBitmapToGallery
 import com.example.photorecipe.vibe.VibeClient
 import com.example.photorecipe.vibe.VibeEdit
+import com.example.photorecipe.vibe.VibeTurn
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -105,6 +106,9 @@ private enum class EditorTab(val label: String, val icon: ImageVector) {
 
 /** [selectedMaskId] sentinel for "show all masks composited" mode. */
 private const val PREVIEW_TARGET_ID = "__preview__"
+
+/** 멀티턴 vibe 대화에서 모델에 보낼 최대 turn 수. 토큰 폭주 방지용 상한. */
+private const val VIBE_HISTORY_MAX = 6
 
 /**
  * PhotoEditor 메인:
@@ -140,6 +144,8 @@ fun PhotoEditorScreen(
     var vibePrompt by remember { mutableStateOf("") }
     var vibeBusy by remember { mutableStateOf(false) }
     var vibeStatus by remember { mutableStateOf<String?>(null) }
+    // 멀티턴 대화 히스토리. "조금 더" / "취소" 같은 후속 명령용.
+    var vibeHistory by remember { mutableStateOf<List<VibeTurn>>(emptyList()) }
 
     // Preview (모든 마스크 합성 결과) 상태. CPU 렌더라 비동기.
     var previewComposite by remember { mutableStateOf<Bitmap?>(null) }
@@ -224,6 +230,8 @@ fun PhotoEditorScreen(
                 masks = emptyList()
                 selectedMaskId = null
                 crop = CropTransform()
+                vibeHistory = emptyList()
+                vibeStatus = null
             },
             onSave = {
                 if (saving) return@TopBar
@@ -397,16 +405,24 @@ fun PhotoEditorScreen(
                         vibeBusy = true
                         vibeStatus = null
                         scope.launch {
-                            val (newMasks, newSelected, status) = applyVibePrompt(
+                            val result = applyVibePrompt(
                                 vibeClient = vibeClient,
                                 prompt = text,
+                                history = vibeHistory,
                                 detectedInstances = detectedInstances,
                                 masks = masks,
                                 globalParams = globalParams,
                             )
-                            masks = newMasks
-                            if (newSelected != null) selectedMaskId = newSelected
-                            vibeStatus = status
+                            masks = result.newMasks
+                            if (result.newSelectedId != null) selectedMaskId = result.newSelectedId
+                            vibeStatus = result.status
+                            // 다음 follow-up 때 모델이 직전 결과를 알 수 있도록 history 갱신.
+                            // 최근 N 턴만 유지 — context 길이 폭주 방지.
+                            vibeHistory = (vibeHistory + VibeTurn(
+                                userPrompt = text,
+                                summary = result.summary,
+                            )).takeLast(VIBE_HISTORY_MAX)
+                            vibePrompt = ""
                             vibeBusy = false
                         }
                     },
@@ -993,7 +1009,13 @@ private fun VibeControls(
 private data class VibeApplyResult(
     val newMasks: List<Mask>,
     val newSelectedId: String?,
+    /** 사용자에게 보여줄 상태 라인. */
     val status: String,
+    /**
+     * 다음 turn 때 Gemini history 에 model 응답으로 넘길 요약. 보통 [status] 와
+     * 동일하지만, history-친화적 압축 형태로 따로 두기 위해 분리.
+     */
+    val summary: String,
 )
 
 /**
@@ -1007,6 +1029,7 @@ private data class VibeApplyResult(
 private suspend fun applyVibePrompt(
     vibeClient: VibeClient,
     prompt: String,
+    history: List<VibeTurn>,
     detectedInstances: List<DetectedInstance>,
     masks: List<Mask>,
     globalParams: EditorParams,
@@ -1024,12 +1047,14 @@ private suspend fun applyVibePrompt(
 
     // ── 2. Gemini 호출 ────────────────────────────────────────────
     val response = runCatching {
-        vibeClient.proposeEdits(prompt, targets, currentValues)
+        vibeClient.proposeEdits(prompt, targets, currentValues, history)
     }.getOrElse { e ->
+        val msg = "Gemini error: ${e.message?.take(120)}"
         return VibeApplyResult(
             newMasks = masks,
             newSelectedId = null,
-            status = "Gemini error: ${e.message?.take(120)}",
+            status = msg,
+            summary = "error: ${e.message?.take(80)}",
         )
     }
     val edits = response.edits
@@ -1037,10 +1062,14 @@ private suspend fun applyVibePrompt(
         // Tool call 이 없으면 모델이 텍스트로 답한 경우가 많음 (거부 / 추가 질문).
         // 그 텍스트를 그대로 보여줘서 왜 안됐는지 알 수 있게.
         val refusal = response.message?.take(220)
+        val status = refusal?.let { "Gemini: $it" } ?: "No edits proposed for: \"$prompt\""
         return VibeApplyResult(
             newMasks = masks,
             newSelectedId = null,
-            status = refusal?.let { "Gemini: $it" } ?: "No edits proposed for: \"$prompt\"",
+            status = status,
+            // 모델이 응답한 텍스트를 그대로 history 에 — 다음 턴에 "왜 그랬어?" 류
+            // 질문이 오더라도 직전 응답을 추적 가능.
+            summary = refusal?.let { "(no edit) said: $it" } ?: "(no edit, ambiguous prompt)",
         )
     }
 
@@ -1098,17 +1127,25 @@ private suspend fun applyVibePrompt(
         )
     }
 
-    val status = if (appliedSummary.isEmpty()) {
+    val isEmpty = appliedSummary.isEmpty()
+    val status = if (isEmpty) {
         "Skipped — no matching region for: \"$prompt\""
     } else {
         val tail = if (skipped > 0) " ($skipped skipped)" else ""
         "Applied: $appliedSummary$tail"
+    }
+    val summary = if (isEmpty) {
+        "(no edit applied: no matching region)"
+    } else {
+        // history 용 — 모델이 다음 턴에 '직전에 뭐 했는지' 읽기 쉽도록.
+        "applied $appliedSummary"
     }
 
     return VibeApplyResult(
         newMasks = mutableMasks,
         newSelectedId = firstAffectedId,
         status = status,
+        summary = summary,
     )
 }
 
