@@ -19,6 +19,15 @@ class Mask(
     val label: String = id,
 ) {
     /**
+     * 편집 합성용 페더된 알파 마스크 — 경계가 Gaussian 으로 부드럽게 fade out.
+     * GL 셰이더 `mix(global, masked, a)` 의 `a` 가 0/1 하드 컷이면 보정 폭이 클 때
+     * 마스크 경계선이 그대로 드러나는 문제를 해소.
+     * UI 의 dim/boundary 오버레이는 일부러 [alphaBitmap] (샤프) 을 그대로 사용 —
+     * "여기까지가 마스크" 를 시각적으로 명확하게 보여주기 위해서.
+     */
+    val featheredAlphaBitmap: Bitmap by lazy { computeFeathered(alphaBitmap) }
+
+    /**
      * "Lightroom 식 활성 마스크 포커스" 오버레이: 마스크가 강한 곳일수록 투명하고,
      * 마스크 바깥(원본 영역) 은 검정으로 어두워진다.
      */
@@ -79,3 +88,73 @@ private fun computeBoundary(maskBitmap: Bitmap, threshold: Int = 30): Bitmap {
     out.setPixels(dst, 0, w, 0, 0, w, h)
     return out
 }
+
+/**
+ * 분리형 가우시안 블러로 마스크 알파를 페더링.
+ *
+ * 비싼 큰 마스크는 1024 max-side 로 일단 다운스케일해서 blur → 다시 원본 크기로
+ * 업스케일. GL_LINEAR 텍스처 보간이 추가로 부드럽게 만들어주므로 시각적 손실은
+ * 무시 가능.
+ */
+private fun computeFeathered(maskBitmap: Bitmap): Bitmap {
+    val origW = maskBitmap.width
+    val origH = maskBitmap.height
+    val maxSide = maxOf(origW, origH)
+    val workScale = if (maxSide > BLUR_WORK_MAX_SIDE) BLUR_WORK_MAX_SIDE.toFloat() / maxSide else 1f
+    val workW = (origW * workScale).toInt().coerceAtLeast(1)
+    val workH = (origH * workScale).toInt().coerceAtLeast(1)
+    val work = if (workScale < 1f) {
+        Bitmap.createScaledBitmap(maskBitmap, workW, workH, true)
+    } else {
+        maskBitmap
+    }
+
+    val srcPx = IntArray(workW * workH)
+    work.getPixels(srcPx, 0, workW, 0, 0, workW, workH)
+    val srcA = FloatArray(workW * workH) { i -> ((srcPx[i] ushr 24) and 0xFF).toFloat() }
+
+    // 마스크 짧은 변의 약 1.5% 를 sigma 로. 너무 작으면 안 보이고, 너무 크면 느려진다.
+    val sigma = (minOf(workW, workH) * 0.015f).coerceIn(4f, 16f)
+    val radius = (3f * sigma).toInt().coerceAtLeast(1)
+    val kernel = FloatArray(2 * radius + 1)
+    val twoSigmaSq = 2f * sigma * sigma
+    var sum = 0f
+    for (i in kernel.indices) {
+        val x = (i - radius).toFloat()
+        kernel[i] = kotlin.math.exp(-x * x / twoSigmaSq)
+        sum += kernel[i]
+    }
+    for (i in kernel.indices) kernel[i] /= sum
+
+    // Horizontal pass
+    val tmp = FloatArray(workW * workH)
+    for (y in 0 until workH) {
+        val row = y * workW
+        for (x in 0 until workW) {
+            val k0 = maxOf(-radius, -x)
+            val k1 = minOf(radius, workW - 1 - x)
+            var v = 0f
+            for (k in k0..k1) v += kernel[k + radius] * srcA[row + x + k]
+            tmp[row + x] = v
+        }
+    }
+
+    // Vertical pass → packed ARGB ints (white RGB, blurred A)
+    val outPx = IntArray(workW * workH)
+    for (y in 0 until workH) {
+        val k0 = maxOf(-radius, -y)
+        val k1 = minOf(radius, workH - 1 - y)
+        for (x in 0 until workW) {
+            var v = 0f
+            for (k in k0..k1) v += kernel[k + radius] * tmp[(y + k) * workW + x]
+            val a = v.toInt().coerceIn(0, 255)
+            outPx[y * workW + x] = (a shl 24) or 0x00FFFFFF
+        }
+    }
+    val blurred = Bitmap.createBitmap(workW, workH, Bitmap.Config.ARGB_8888)
+    blurred.setPixels(outPx, 0, workW, 0, 0, workW, workH)
+
+    return if (workScale < 1f) Bitmap.createScaledBitmap(blurred, origW, origH, true) else blurred
+}
+
+private const val BLUR_WORK_MAX_SIDE = 1024

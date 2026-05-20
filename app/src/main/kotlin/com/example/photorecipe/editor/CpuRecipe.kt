@@ -132,7 +132,9 @@ fun applyRecipeMasked(
         scaledAlpha.getPixels(alphaPixels, 0, w, 0, 0, w, h)
 
         for (i in 0 until n) {
-            val alpha = ((alphaPixels[i] ushr 16) and 0xFF) / 255f
+            // 마스크는 ALPHA 채널에 강도가 들어있다. RGB 는 흰색 (255) 이라 R 을 읽으면
+            // Bitmap 이 premultiplied 라 항상 255 (unpremul 복원) → 페더 엣지가 사라짐.
+            val alpha = ((alphaPixels[i] ushr 24) and 0xFF) / 255f
             if (alpha < 0.001f) continue
             val br = (basePixels[i] ushr 16) and 0xFF
             val bg = (basePixels[i] ushr 8) and 0xFF

@@ -164,8 +164,9 @@ fun PhotoEditorScreen(
                             val cropped = applyCropTransform(full, crop)
                             // 마스크 비트맵은 프리뷰 해상도라 풀해상도에 맞춰 스케일.
                             val scaledMasks = masks.map { m ->
+                                // 페더된 알파를 사용해 저장본도 프리뷰처럼 부드러운 경계를 갖도록.
                                 val scaled = Bitmap.createScaledBitmap(
-                                    m.alphaBitmap, cropped.width, cropped.height, true,
+                                    m.featheredAlphaBitmap, cropped.width, cropped.height, true,
                                 )
                                 m to scaled
                             }
@@ -193,7 +194,8 @@ fun PhotoEditorScreen(
             ImageGLView(
                 bitmap = croppedPreview,
                 global = globalParams,
-                maskBitmap = activeMask?.alphaBitmap,
+                // GL 합성에는 페더된 알파 — 보정 경계가 자연스럽게 fade.
+                maskBitmap = activeMask?.featheredAlphaBitmap,
                 mask = activeMask?.params,
                 modifier = Modifier.fillMaxSize(),
             )
