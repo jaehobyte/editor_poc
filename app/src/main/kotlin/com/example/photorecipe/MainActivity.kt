@@ -28,6 +28,7 @@ import com.example.photorecipe.ui.cameragen.CameraGenFlow
 import com.example.photorecipe.ui.photoeditor.PhotoEditorFlow
 import com.example.photorecipe.ui.theme.NewCamTheme
 import com.example.photorecipe.ui.theme.PhotoColors
+import com.example.photorecipe.vibe.VibeClient
 
 class MainActivity : ComponentActivity() {
 
@@ -59,6 +60,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
     val generator = remember { RecipeGenerator(context) }
     val gemini = remember { GeminiImageClient(BuildConfig.GEMINI_KEY) }
     val segmenter = remember { SegmentationEngine.create(context) }
+    val vibeClient = remember { VibeClient(BuildConfig.GEMINI_KEY) }
 
     var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
 
@@ -81,6 +83,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
             )
             AppRoute.PhotoEditor -> PhotoEditorFlow(
                 segmenter = segmenter,
+                vibeClient = vibeClient,
                 onExit = { route = AppRoute.Home },
                 modifier = Modifier.fillMaxSize(),
             )

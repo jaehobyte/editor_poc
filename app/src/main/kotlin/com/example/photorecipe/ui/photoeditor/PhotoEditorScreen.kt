@@ -24,20 +24,25 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.FlipCameraAndroid
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Photo
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.RotateRight
+import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -76,12 +81,22 @@ import com.example.photorecipe.ui.ImageGLView
 import com.example.photorecipe.ui.theme.PhotoColors
 import com.example.photorecipe.util.decodeBitmapForExport
 import com.example.photorecipe.util.saveBitmapToGallery
+import com.example.photorecipe.vibe.VibeClient
+import com.example.photorecipe.vibe.VibeEdit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+import android.app.Activity
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import java.util.Locale
+
 private enum class EditorTab(val label: String, val icon: ImageVector) {
+    VIBE("VIBE", Icons.Outlined.AutoAwesome),
     ADJUST("ADJUST", Icons.Outlined.Tune),
     COLOR("COLOR", Icons.Outlined.Palette),
     FILTERS("FILTERS", Icons.Outlined.Photo),
@@ -100,6 +115,7 @@ fun PhotoEditorScreen(
     originalUri: Uri,
     previewBitmap: Bitmap,
     segmenter: SegmentationEngine,
+    vibeClient: VibeClient,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -116,6 +132,11 @@ fun PhotoEditorScreen(
     var toast by remember { mutableStateOf<String?>(null) }
     var detectedInstances by remember { mutableStateOf<List<DetectedInstance>>(emptyList()) }
     var detecting by remember { mutableStateOf(false) }
+
+    // Vibe (Gemini 자연어 편집) 상태.
+    var vibePrompt by remember { mutableStateOf("") }
+    var vibeBusy by remember { mutableStateOf(false) }
+    var vibeStatus by remember { mutableStateOf<String?>(null) }
 
     // Crop 적용된 프리뷰 + 마스크
     var croppedPreview by remember { mutableStateOf(previewBitmap) }
@@ -282,6 +303,31 @@ fun PhotoEditorScreen(
             TabStrip(tab = tab, onTabChange = { tab = it })
             Spacer(Modifier.height(8.dp))
             when (tab) {
+                EditorTab.VIBE -> VibeControls(
+                    prompt = vibePrompt,
+                    onPromptChange = { vibePrompt = it },
+                    busy = vibeBusy,
+                    status = vibeStatus,
+                    onSubmit = {
+                        val text = vibePrompt.trim()
+                        if (text.isBlank() || vibeBusy) return@VibeControls
+                        vibeBusy = true
+                        vibeStatus = null
+                        scope.launch {
+                            val (newMasks, newSelected, status) = applyVibePrompt(
+                                vibeClient = vibeClient,
+                                prompt = text,
+                                detectedInstances = detectedInstances,
+                                masks = masks,
+                                globalParams = globalParams,
+                            )
+                            masks = newMasks
+                            if (newSelected != null) selectedMaskId = newSelected
+                            vibeStatus = status
+                            vibeBusy = false
+                        }
+                    },
+                )
                 EditorTab.ADJUST -> AdjustControls(targetParams)
                 EditorTab.COLOR -> ColorControls(targetParams)
                 EditorTab.FILTERS -> FiltersRow(targetParams)
@@ -741,5 +787,235 @@ private fun SliderRow(label: String, value: Float, onChange: (Float) -> Unit) {
                 inactiveTrackColor = PhotoColors.BorderDark,
             ),
         )
+    }
+}
+
+// ─── Vibe (Gemini 자연어 편집) ────────────────────────────────────
+
+@Composable
+private fun VibeControls(
+    prompt: String,
+    onPromptChange: (String) -> Unit,
+    busy: Boolean,
+    status: String?,
+    onSubmit: () -> Unit,
+) {
+    val voiceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.takeIf { it.isNotBlank() }
+            if (spoken != null) {
+                onPromptChange(spoken)
+                onSubmit()
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(240.dp)
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "VIBE — describe an edit",
+            color = PhotoColors.CoolSilver,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = onPromptChange,
+                modifier = Modifier.weight(1f),
+                placeholder = {
+                    Text(
+                        "예: 하늘을 좀 더 따뜻한 색으로",
+                        color = PhotoColors.MidSlate,
+                        fontSize = 13.sp,
+                    )
+                },
+                enabled = !busy,
+                singleLine = false,
+                maxLines = 3,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = PhotoColors.PureWhite,
+                    unfocusedTextColor = PhotoColors.PureWhite,
+                    focusedBorderColor = PhotoColors.PureWhite,
+                    unfocusedBorderColor = PhotoColors.BorderDark,
+                    cursorColor = PhotoColors.PureWhite,
+                ),
+                shape = RoundedCornerShape(12.dp),
+            )
+            IconButton(
+                onClick = {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(
+                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                        )
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "어떻게 보정할까요?")
+                    }
+                    runCatching { voiceLauncher.launch(intent) }
+                },
+                enabled = !busy,
+            ) {
+                Icon(Icons.Outlined.Mic, "Voice", tint = PhotoColors.PureWhite)
+            }
+            IconButton(onClick = onSubmit, enabled = !busy && prompt.isNotBlank()) {
+                if (busy) {
+                    CircularProgressIndicator(
+                        color = PhotoColors.PureWhite,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp),
+                    )
+                } else {
+                    Icon(Icons.Outlined.Send, "Send", tint = PhotoColors.PureWhite)
+                }
+            }
+        }
+        if (status != null) {
+            Text(
+                text = status,
+                color = PhotoColors.CoolSilver,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
+/** Vibe prompt 한 번 처리 결과. */
+private data class VibeApplyResult(
+    val newMasks: List<Mask>,
+    val newSelectedId: String?,
+    val status: String,
+)
+
+/**
+ * Gemini 에게 자연어 프롬프트를 보내 [VibeEdit] 들을 받아오고, 각 edit 을
+ * 현재 마스크/global 상태에 반영한다.
+ *
+ * Gemini 가 "sky" 같은 라벨을 골랐는데 아직 마스크가 만들어져있지 않으면,
+ * 자동 검출된 [DetectedInstance] 에서 매칭되는 첫 번째 인스턴스로 새 마스크를
+ * 생성해서 추가. 매칭 인스턴스가 없으면 그 edit 은 무시.
+ */
+private suspend fun applyVibePrompt(
+    vibeClient: VibeClient,
+    prompt: String,
+    detectedInstances: List<DetectedInstance>,
+    masks: List<Mask>,
+    globalParams: EditorParams,
+): VibeApplyResult {
+    // ── 1. 후보 라벨 목록 & 현재 값 직렬화 ─────────────────────────
+    val detectionLabels = detectedInstances.map { it.label.lowercase() }.distinct()
+    val maskLabels = masks.map { it.label.lowercase() }
+    val candidateLabels = (maskLabels + detectionLabels).distinct()
+    val targets = listOf("global") + candidateLabels
+
+    val currentValues = buildMap<String, EditorParams> {
+        put("global", globalParams)
+        for (m in masks) put(m.label.lowercase(), m.params)
+    }
+
+    // ── 2. Gemini 호출 ────────────────────────────────────────────
+    val edits = runCatching {
+        vibeClient.proposeEdits(prompt, targets, currentValues)
+    }.getOrElse { e ->
+        return VibeApplyResult(
+            newMasks = masks,
+            newSelectedId = null,
+            status = "Gemini error: ${e.message?.take(120)}",
+        )
+    }
+    if (edits.isEmpty()) {
+        return VibeApplyResult(
+            newMasks = masks,
+            newSelectedId = null,
+            status = "No edits proposed for: \"$prompt\"",
+        )
+    }
+
+    // ── 3. 각 edit 을 적용 ────────────────────────────────────────
+    val mutableMasks = masks.toMutableList()
+    var firstAffectedId: String? = null
+    val appliedSummary = StringBuilder()
+    var skipped = 0
+
+    for (edit in edits) {
+        val target = edit.target
+        val params: EditorParams? = if (target == "global") {
+            globalParams
+        } else {
+            val existing = mutableMasks.firstOrNull { it.label.equals(target, ignoreCase = true) }
+            if (existing != null) {
+                existing.params
+            } else {
+                val inst = detectedInstances.firstOrNull {
+                    it.label.equals(target, ignoreCase = true)
+                }
+                if (inst == null) {
+                    skipped++
+                    null
+                } else {
+                    val baseline = EditorParams().apply { copyValuesFrom(globalParams) }
+                    val newMask = Mask(
+                        id = "mask-${System.currentTimeMillis()}-${target}",
+                        alphaBitmap = inst.alphaBitmap,
+                        params = baseline,
+                        label = inst.label.replaceFirstChar { it.uppercase() },
+                    )
+                    mutableMasks += newMask
+                    if (firstAffectedId == null) firstAffectedId = newMask.id
+                    baseline
+                }
+            }
+        }
+        if (params == null) continue
+        applyChanges(params, edit.changes)
+
+        if (target != "global" && firstAffectedId == null) {
+            firstAffectedId = mutableMasks.firstOrNull { it.label.equals(target, ignoreCase = true) }?.id
+        }
+
+        if (appliedSummary.isNotEmpty()) appliedSummary.append(" · ")
+        appliedSummary.append(target).append(": ")
+            .append(edit.changes.entries.joinToString(", ") { (k, v) -> "$k=${v.toInt()}" })
+    }
+
+    val status = if (appliedSummary.isEmpty()) {
+        "Skipped — no matching region for: \"$prompt\""
+    } else {
+        val tail = if (skipped > 0) " ($skipped skipped)" else ""
+        "Applied: $appliedSummary$tail"
+    }
+
+    return VibeApplyResult(
+        newMasks = mutableMasks,
+        newSelectedId = firstAffectedId,
+        status = status,
+    )
+}
+
+private fun applyChanges(p: EditorParams, changes: Map<String, Float>) {
+    for ((k, v) in changes) {
+        when (k) {
+            "temperature" -> p.temperature = v
+            "contrast" -> p.contrast = v
+            "tint" -> p.tint = v
+            "saturation" -> p.saturation = v
+            "brightness" -> p.brightness = v
+            "exposure" -> p.exposure = v
+            "highlights" -> p.highlights = v
+            "shadows" -> p.shadows = v
+        }
     }
 }

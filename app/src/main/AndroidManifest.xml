@@ -5,6 +5,13 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Vibe Editor 의 음성 입력 (Android 11+ 패키지 가시성 요구사항). -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+    </queries>
+
     <application
         android:label="Photo Recipe Generator"
         android:icon="@mipmap/ic_launcher"

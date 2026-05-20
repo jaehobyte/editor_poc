@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.ui.theme.PhotoColors
+import com.example.photorecipe.vibe.VibeClient
 import com.example.photorecipe.util.decodeBitmapWithOrientation
 import com.example.photorecipe.util.downscaleForGL
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,7 @@ private sealed interface PePhase {
 @Composable
 fun PhotoEditorFlow(
     segmenter: SegmentationEngine,
+    vibeClient: VibeClient,
     onExit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -81,6 +83,7 @@ fun PhotoEditorFlow(
                     originalUri = p.uri,
                     previewBitmap = p.preview,
                     segmenter = segmenter,
+                    vibeClient = vibeClient,
                     onBack = { phase = PePhase.Picker },
                 )
             }
