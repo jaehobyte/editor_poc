@@ -24,6 +24,7 @@ import com.example.photorecipe.ui.AppRoute
 import com.example.photorecipe.ui.HomeScreen
 import com.example.photorecipe.ui.PhotoRecipeFlow
 import com.example.photorecipe.ui.cameragen.CameraGenFlow
+import com.example.photorecipe.ui.photoeditor.PhotoEditorFlow
 import com.example.photorecipe.ui.theme.NewCamTheme
 import com.example.photorecipe.ui.theme.PhotoColors
 
@@ -73,6 +74,10 @@ private fun AppRoot(modifier: Modifier = Modifier) {
             )
             AppRoute.CameraGen -> CameraGenFlow(
                 gemini = gemini,
+                onExit = { route = AppRoute.Home },
+                modifier = Modifier.fillMaxSize(),
+            )
+            AppRoute.PhotoEditor -> PhotoEditorFlow(
                 onExit = { route = AppRoute.Home },
                 modifier = Modifier.fillMaxSize(),
             )

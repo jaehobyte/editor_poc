@@ -7,6 +7,7 @@ sealed interface AppRoute {
     data object Home : AppRoute
     data object PhotoRecipe : AppRoute
     data object CameraGen : AppRoute
+    data object PhotoEditor : AppRoute
 }
 
 /** Home 화면에 비눗방울로 띄울 feature 메타데이터. */
@@ -40,6 +41,16 @@ val FEATURES: List<FeatureCard> = listOf(
             Color(0xFF6BE3FF),
             Color(0xFF6B7BFF),
             Color(0xFF9D6BFF),
+        ),
+    ),
+    FeatureCard(
+        route = AppRoute.PhotoEditor,
+        name = "Photo\nEditor",
+        subtitle = "Adjust · Crop · Filter",
+        gradient = listOf(
+            Color(0xFF6BFFB1),
+            Color(0xFF4BD7B0),
+            Color(0xFF267E9F),
         ),
     ),
 )
