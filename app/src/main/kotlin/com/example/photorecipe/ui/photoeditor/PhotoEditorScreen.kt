@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import com.example.photorecipe.EditorParams
 import com.example.photorecipe.editor.applyRecipeMasked
 import com.example.photorecipe.segmentation.SegmentationEngine
+import com.example.photorecipe.segmentation.SegmentationEngine.DetectedInstance
 import com.example.photorecipe.ui.ImageGLView
 import com.example.photorecipe.ui.theme.PhotoColors
 import com.example.photorecipe.util.decodeBitmapForExport
@@ -119,11 +120,22 @@ fun PhotoEditorScreen(
     var segmenting by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
+    var detectedInstances by remember { mutableStateOf<List<DetectedInstance>>(emptyList()) }
+    var detecting by remember { mutableStateOf(false) }
 
     // Crop 적용된 프리뷰 + 마스크
     var croppedPreview by remember { mutableStateOf(previewBitmap) }
     LaunchedEffect(previewBitmap, crop) {
         croppedPreview = withContext(Dispatchers.IO) { applyCropTransform(previewBitmap, crop) }
+    }
+
+    // 이미지가 들어오거나 crop 이 바뀔 때마다 인스턴스 자동 검출.
+    LaunchedEffect(croppedPreview) {
+        detecting = true
+        detectedInstances = withContext(Dispatchers.IO) {
+            runCatching { segmenter.detect(croppedPreview) }.getOrElse { emptyList() }
+        }
+        detecting = false
     }
 
     // 슬라이더가 편집할 대상 (global or selected mask)
@@ -255,6 +267,17 @@ fun PhotoEditorScreen(
                         .fillMaxSize()
                         .alpha(dimStrength),
                 )
+                // 추가: 마스크 경계선을 밝은 청록색으로 그려서 어느 영역이 편집 중인지 명확히.
+                Image(
+                    bitmap = m.boundaryBitmap.asImageBitmap(),
+                    contentDescription = "Mask boundary",
+                    contentScale = ContentScale.Fit,
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
+                        Color(0xFF6BE3FF),
+                        androidx.compose.ui.graphics.BlendMode.SrcIn,
+                    ),
+                    modifier = Modifier.fillMaxSize().alpha(0.95f),
+                )
             }
 
             if (segmenting) {
@@ -283,6 +306,40 @@ fun PhotoEditorScreen(
         Column(
             modifier = Modifier.fillMaxWidth().background(PhotoColors.DeepBlack),
         ) {
+            DetectedInstancesRow(
+                detecting = detecting,
+                instances = detectedInstances,
+                onTap = { inst ->
+                    if (segmenting) return@DetectedInstancesRow
+                    segmenting = true
+                    scope.launch {
+                        val r = runCatching {
+                            withContext(Dispatchers.IO) {
+                                segmenter.segment(
+                                    croppedPreview,
+                                    inst.centerNormalized.first,
+                                    inst.centerNormalized.second,
+                                )
+                            }
+                        }
+                        segmenting = false
+                        r.fold(
+                            onSuccess = { alpha ->
+                                val maskParams = EditorParams().apply { copyValuesFrom(globalParams) }
+                                val newMask = Mask(
+                                    id = "mask-${System.currentTimeMillis()}",
+                                    alphaBitmap = alpha,
+                                    params = maskParams,
+                                    label = inst.label.replaceFirstChar { it.uppercase() },
+                                )
+                                masks = masks + newMask
+                                selectedMaskId = newMask.id
+                            },
+                            onFailure = { toast = "Segmentation failed: ${it.message}" },
+                        )
+                    }
+                },
+            )
             MaskSelectorRow(
                 masks = masks,
                 selectedId = selectedMaskId,
@@ -365,6 +422,96 @@ private fun TopBar(saving: Boolean, onBack: () -> Unit, onReset: () -> Unit, onS
         IconButton(onClick = onSave) {
             Icon(Icons.Outlined.Download, contentDescription = "Save", tint = PhotoColors.PureWhite)
         }
+    }
+}
+
+// ─── Detected instances (auto) row ───────────────────────────────
+
+private val INSTANCE_PALETTE = listOf(
+    Color(0xFFFF6B6B), Color(0xFFFFB347), Color(0xFFFDD835),
+    Color(0xFF43A047), Color(0xFF1E88E5), Color(0xFF9C27B0),
+    Color(0xFF00BCD4), Color(0xFFE91E63),
+)
+
+@Composable
+private fun DetectedInstancesRow(
+    detecting: Boolean,
+    instances: List<DetectedInstance>,
+    onTap: (DetectedInstance) -> Unit,
+) {
+    if (!detecting && instances.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = if (detecting) "DETECTING INSTANCES…" else "DETECTED",
+            style = MaterialTheme.typography.labelSmall,
+            color = PhotoColors.CoolSilver,
+            modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+        )
+        if (detecting) {
+            Box(
+                modifier = Modifier.fillMaxWidth().height(36.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                CircularProgressIndicator(
+                    color = PhotoColors.PureWhite,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                instances.forEachIndexed { i, inst ->
+                    InstanceChip(
+                        label = inst.label,
+                        score = inst.score,
+                        accent = INSTANCE_PALETTE[i % INSTANCE_PALETTE.size],
+                        onClick = { onTap(inst) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InstanceChip(label: String, score: Float, accent: Color, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(PhotoColors.DarkSurface)
+            .border(1.dp, accent.copy(alpha = 0.8f), RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(start = 10.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(accent),
+        )
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = label.replaceFirstChar { it.uppercase() },
+            color = PhotoColors.PureWhite,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.size(4.dp))
+        Text(
+            text = "${(score * 100).toInt()}%",
+            color = PhotoColors.MidSlate,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+        )
     }
 }
 
