@@ -88,18 +88,19 @@ import com.example.photorecipe.util.saveBitmapToGallery
 import com.example.photorecipe.vibe.VibeClient
 import com.example.photorecipe.vibe.VibeEdit
 import com.example.photorecipe.vibe.VibeTurn
+import com.example.photorecipe.vibe.rememberSpeechSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-import android.app.Activity
-import android.content.Intent
-import android.speech.RecognizerIntent
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import java.util.Locale
+import androidx.compose.ui.draw.scale
+import androidx.core.content.ContextCompat
 
 private enum class EditorTab(val label: String, val icon: ImageVector) {
     VIBE("VIBE", Icons.Outlined.AutoAwesome),
@@ -978,20 +979,26 @@ private fun VibeControls(
     status: String?,
     onSubmit: () -> Unit,
 ) {
-    val voiceLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spoken = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-                ?.takeIf { it.isNotBlank() }
-            if (spoken != null) {
-                onPromptChange(spoken)
-                onSubmit()
-            }
-        }
+    val context = LocalContext.current
+    val session = rememberSpeechSession()
+    val haptic = LocalHapticFeedback.current
+
+    // RECORD_AUDIO 권한 요청. 첫 press 에 grant 가 안 되어 있으면 한 번 다이얼로그.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* 권한 결과는 다음 press 때 자연스럽게 반영. */ }
+
+    // 부분 인식 텍스트를 실시간으로 prompt 필드에 흘려보냄.
+    LaunchedEffect(session.recording, session.partial) {
+        if (session.recording) onPromptChange(session.partial)
     }
+
+    // 부드러운 펄스 — recording 중에는 rms 기반으로 확대.
+    val pulseScale by animateFloatAsState(
+        targetValue = if (session.recording) 1f + session.rms * 0.4f else 1f,
+        animationSpec = tween(durationMillis = 80),
+        label = "mic-pulse",
+    )
 
     Column(
         modifier = Modifier
@@ -1015,12 +1022,12 @@ private fun VibeControls(
                 modifier = Modifier.weight(1f),
                 placeholder = {
                     Text(
-                        "예: 하늘을 좀 더 따뜻한 색으로",
+                        if (session.recording) "듣고 있어요…" else "예: 하늘을 좀 더 따뜻한 색으로",
                         color = PhotoColors.MidSlate,
                         fontSize = 13.sp,
                     )
                 },
-                enabled = !busy,
+                enabled = !busy && !session.recording,
                 singleLine = false,
                 maxLines = 3,
                 colors = OutlinedTextFieldDefaults.colors(
@@ -1029,24 +1036,57 @@ private fun VibeControls(
                     focusedBorderColor = PhotoColors.PureWhite,
                     unfocusedBorderColor = PhotoColors.BorderDark,
                     cursorColor = PhotoColors.PureWhite,
+                    disabledTextColor = PhotoColors.PureWhite,
+                    disabledBorderColor = Color(0xFFFF6B6B),
                 ),
                 shape = RoundedCornerShape(12.dp),
             )
-            IconButton(
-                onClick = {
-                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(
-                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+            // Push-to-talk 마이크. 꾹 누르고 있으면 듣기 시작, 떼면 종료 + 자동 submit.
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .scale(pulseScale)
+                    .clip(CircleShape)
+                    .background(
+                        if (session.recording) Color(0xFFFF6B6B) else PhotoColors.DarkSurface,
+                    )
+                    .border(
+                        1.dp,
+                        if (session.recording) Color(0xFFFF6B6B) else PhotoColors.BorderDark,
+                        CircleShape,
+                    )
+                    .pointerInput(busy) {
+                        if (busy) return@pointerInput
+                        detectTapGestures(
+                            onPress = {
+                                val granted = ContextCompat.checkSelfPermission(
+                                    context, Manifest.permission.RECORD_AUDIO,
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!granted) {
+                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    return@detectTapGestures
+                                }
+                                onPromptChange("")
+                                val started = session.start { finalText ->
+                                    onPromptChange(finalText)
+                                    onSubmit()
+                                }
+                                if (started) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                                tryAwaitRelease()
+                                if (session.recording) session.stop()
+                            },
                         )
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                        putExtra(RecognizerIntent.EXTRA_PROMPT, "어떻게 보정할까요?")
-                    }
-                    runCatching { voiceLauncher.launch(intent) }
-                },
-                enabled = !busy,
+                    },
+                contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.Mic, "Voice", tint = PhotoColors.PureWhite)
+                Icon(
+                    Icons.Outlined.Mic,
+                    contentDescription = "Push-to-talk",
+                    tint = if (session.recording) PhotoColors.PureWhite else PhotoColors.PureWhite,
+                    modifier = Modifier.size(22.dp),
+                )
             }
             IconButton(onClick = onSubmit, enabled = !busy && prompt.isNotBlank()) {
                 if (busy) {
@@ -1060,13 +1100,31 @@ private fun VibeControls(
                 }
             }
         }
-        if (status != null) {
-            Text(
-                text = status,
-                color = PhotoColors.CoolSilver,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+        when {
+            session.recording -> {
+                Text(
+                    text = "듣고 있어요… 손을 떼면 전송",
+                    color = Color(0xFFFF8C8C),
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            session.error != null -> {
+                Text(
+                    text = session.error.orEmpty(),
+                    color = Color(0xFFFF8C8C),
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            status != null -> {
+                Text(
+                    text = status,
+                    color = PhotoColors.CoolSilver,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         }
     }
 }

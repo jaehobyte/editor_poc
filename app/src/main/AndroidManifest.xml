@@ -2,8 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- Vibe Editor 의 음성 입력 (Android 11+ 패키지 가시성 요구사항). -->
+    <!-- Vibe Editor 의 인앱 음성 입력 (Android 11+ 패키지 가시성 요구사항). -->
     <queries>
         <intent>
             <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
