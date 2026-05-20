@@ -17,11 +17,14 @@ import java.nio.channels.FileChannel
  * Output : [1, 128, 128, 150] float32 logits (입력 1/4 해상도).
  *
  * 흐름:
- *   1) bitmap → 512×512 stretch resize → ImageNet 정규화 → NHWC float buffer
- *   2) interpreter.run → logits
- *   3) per-pixel argmax → 128×128 라벨 맵
- *   4) [SCENERY_CLASSES] 화이트리스트의 클래스 중 [minAreaFrac] 이상 차지하는
- *      클래스마다 512×512 alpha mask Bitmap 생성 (nearest-neighbor 업샘플).
+ *   1) bitmap → aspect-ratio 를 유지하면서 letterbox 로 512×512 에 맞춤.
+ *      (stretch 시키면 풍경 추론이 비정상으로 망가지고, 정사각 알파 비트맵을
+ *       만들어 Compose `ContentScale.Fit` 오버레이가 실제 이미지 영역과
+ *       어긋나는 버그가 있었음.)
+ *   2) interpreter.run → logits, per-pixel argmax → 128×128 label map.
+ *   3) padding 영역은 잘라내고, 실제 컨텐츠 영역의 label 만 사용해서
+ *      입력 비트맵 해상도(bitmap.width × bitmap.height) 그대로의 alpha
+ *      mask Bitmap 을 생성. (DeepLab 마스크와 동일한 좌표계.)
  */
 class SegFormerSceneryEngine private constructor(
     private val interpreter: Interpreter,
@@ -37,29 +40,59 @@ class SegFormerSceneryEngine private constructor(
         bitmap: Bitmap,
         minAreaFrac: Float = 0.04f,
     ): List<SegmentationEngine.DetectedInstance> {
-        val resized = Bitmap.createScaledBitmap(bitmap, IN_SIZE, IN_SIZE, true)
-        fillInputBuffer(resized)
+        val srcW = bitmap.width
+        val srcH = bitmap.height
 
+        // ── 1) Letterbox-resize to 512×512 ──────────────────────────────
+        val scale = minOf(IN_SIZE.toFloat() / srcW, IN_SIZE.toFloat() / srcH)
+        val contentW = (srcW * scale).toInt().coerceIn(1, IN_SIZE)
+        val contentH = (srcH * scale).toInt().coerceIn(1, IN_SIZE)
+        val padLeft = (IN_SIZE - contentW) / 2
+        val padTop = (IN_SIZE - contentH) / 2
+        val resized = Bitmap.createScaledBitmap(bitmap, contentW, contentH, true)
+        fillInputBufferLetterboxed(resized, padLeft, padTop, contentW, contentH)
+
+        // ── 2) Inference + argmax ───────────────────────────────────────
         outputBuf.rewind()
         interpreter.run(inputBuf, outputBuf)
         outputBuf.rewind()
-
         val labels = argmaxToLabels(outputBuf)
-        val up = upsampleNearest(labels, OUT_SIZE, IN_SIZE)
 
+        // ── 3) Content region in 128×128 output coords ──────────────────
+        // 정수 나눗셈으로 보수적으로 안쪽만 사용 → padding 픽셀이 결과에 새지 않음.
+        val outPadLeft = (padLeft + (RATIO - 1)) / RATIO          // ceil
+        val outPadTop = (padTop + (RATIO - 1)) / RATIO
+        val outRight = (padLeft + contentW) / RATIO               // floor
+        val outBottom = (padTop + contentH) / RATIO
+        val outContentW = (outRight - outPadLeft).coerceAtLeast(1)
+        val outContentH = (outBottom - outPadTop).coerceAtLeast(1)
+
+        // padding 을 제외한 컨텐츠 영역에서 클래스별 픽셀 카운트.
         val counts = IntArray(NUM_CLASSES)
-        for (b in up) counts[b.toInt() and 0xFF]++
+        for (y in outPadTop until outPadTop + outContentH) {
+            val row = y * OUT_SIZE
+            for (x in outPadLeft until outPadLeft + outContentW) {
+                counts[labels[row + x].toInt() and 0xFF]++
+            }
+        }
 
-        val minArea = (IN_SIZE * IN_SIZE * minAreaFrac).toInt()
+        val totalArea = outContentW * outContentH
+        val minArea = (totalArea * minAreaFrac).toInt()
+
         val out = ArrayList<SegmentationEngine.DetectedInstance>()
         for ((id, label) in SCENERY_CLASSES) {
             if (counts[id] < minArea) continue
-            val mask = buildAlphaMask(up, id.toByte())
-            val frac = counts[id].toFloat() / (IN_SIZE * IN_SIZE)
+            val mask = buildAlphaMaskFromCrop(
+                labels = labels,
+                target = id.toByte(),
+                cropX = outPadLeft, cropY = outPadTop,
+                cropW = outContentW, cropH = outContentH,
+                dstW = srcW, dstH = srcH,
+            )
             out += SegmentationEngine.DetectedInstance(
                 label = label,
-                score = frac,
-                bbox = RectF(0f, 0f, IN_SIZE.toFloat(), IN_SIZE.toFloat()),
+                score = counts[id].toFloat() / totalArea,
+                bbox = RectF(0f, 0f, srcW.toFloat(), srcH.toFloat()),
                 alphaBitmap = mask,
             )
         }
@@ -71,17 +104,39 @@ class SegFormerSceneryEngine private constructor(
         interpreter.close()
     }
 
-    private fun fillInputBuffer(bmp: Bitmap) {
-        val pixels = IntArray(IN_SIZE * IN_SIZE)
-        bmp.getPixels(pixels, 0, IN_SIZE, 0, 0, IN_SIZE, IN_SIZE)
+    private fun fillInputBufferLetterboxed(
+        content: Bitmap,
+        padLeft: Int, padTop: Int,
+        contentW: Int, contentH: Int,
+    ) {
+        // padding 영역의 normalize 값. raw RGB 0 을 ImageNet normalize 한 값.
+        val padR = (-0.485f) / 0.229f
+        val padG = (-0.456f) / 0.224f
+        val padB = (-0.406f) / 0.225f
+
+        val pixels = IntArray(contentW * contentH)
+        content.getPixels(pixels, 0, contentW, 0, 0, contentW, contentH)
+
         inputBuf.rewind()
-        for (px in pixels) {
-            val r = ((px ushr 16) and 0xFF) / 255f
-            val g = ((px ushr 8) and 0xFF) / 255f
-            val b = (px and 0xFF) / 255f
-            inputBuf.putFloat((r - 0.485f) / 0.229f)
-            inputBuf.putFloat((g - 0.456f) / 0.224f)
-            inputBuf.putFloat((b - 0.406f) / 0.225f)
+        for (y in 0 until IN_SIZE) {
+            val cy = y - padTop
+            val inY = cy in 0 until contentH
+            for (x in 0 until IN_SIZE) {
+                val cx = x - padLeft
+                if (inY && cx in 0 until contentW) {
+                    val px = pixels[cy * contentW + cx]
+                    val r = ((px ushr 16) and 0xFF) / 255f
+                    val g = ((px ushr 8) and 0xFF) / 255f
+                    val b = (px and 0xFF) / 255f
+                    inputBuf.putFloat((r - 0.485f) / 0.229f)
+                    inputBuf.putFloat((g - 0.456f) / 0.224f)
+                    inputBuf.putFloat((b - 0.406f) / 0.225f)
+                } else {
+                    inputBuf.putFloat(padR)
+                    inputBuf.putFloat(padG)
+                    inputBuf.putFloat(padB)
+                }
+            }
         }
         inputBuf.rewind()
     }
@@ -102,27 +157,31 @@ class SegFormerSceneryEngine private constructor(
         return labels
     }
 
-    private fun upsampleNearest(src: ByteArray, srcSize: Int, dstSize: Int): ByteArray {
-        val out = ByteArray(dstSize * dstSize)
-        val scale = dstSize / srcSize
-        for (y in 0 until dstSize) {
-            val sy = y / scale
-            val srcRow = sy * srcSize
-            val dstRow = y * dstSize
-            for (x in 0 until dstSize) {
-                out[dstRow + x] = src[srcRow + (x / scale)]
+    /**
+     * 128×128 label map 의 `[cropX, cropY, cropW, cropH]` 영역을 nearest-neighbor
+     * 로 `(dstW, dstH)` alpha bitmap 으로 업샘플. `target` 라벨인 픽셀만 불투명.
+     */
+    private fun buildAlphaMaskFromCrop(
+        labels: ByteArray,
+        target: Byte,
+        cropX: Int, cropY: Int, cropW: Int, cropH: Int,
+        dstW: Int, dstH: Int,
+    ): Bitmap {
+        val pixels = IntArray(dstW * dstH)
+        for (y in 0 until dstH) {
+            // 정수 매핑으로 src y 결정 (clamp 로 끝 안전).
+            val sy = (cropY + (y * cropH) / dstH).coerceAtMost(cropY + cropH - 1)
+            val srcRow = sy * OUT_SIZE
+            val dstRow = y * dstW
+            for (x in 0 until dstW) {
+                val sx = (cropX + (x * cropW) / dstW).coerceAtMost(cropX + cropW - 1)
+                if (labels[srcRow + sx] == target) {
+                    pixels[dstRow + x] = WHITE_ALPHA
+                }
             }
         }
-        return out
-    }
-
-    private fun buildAlphaMask(labels: ByteArray, target: Byte): Bitmap {
-        val pixels = IntArray(IN_SIZE * IN_SIZE)
-        for (i in labels.indices) {
-            if (labels[i] == target) pixels[i] = WHITE_ALPHA
-        }
-        val out = Bitmap.createBitmap(IN_SIZE, IN_SIZE, Bitmap.Config.ARGB_8888)
-        out.setPixels(pixels, 0, IN_SIZE, 0, 0, IN_SIZE, IN_SIZE)
+        val out = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, dstW, 0, 0, dstW, dstH)
         return out
     }
 
@@ -130,6 +189,7 @@ class SegFormerSceneryEngine private constructor(
         private const val MODEL_PATH = "segformer_b0_ade20k.tflite"
         private const val IN_SIZE = 512
         private const val OUT_SIZE = 128
+        private const val RATIO = IN_SIZE / OUT_SIZE  // 4
         private const val NUM_CLASSES = 150
         private val WHITE_ALPHA: Int = AndroidColor.argb(255, 255, 255, 255)
 
