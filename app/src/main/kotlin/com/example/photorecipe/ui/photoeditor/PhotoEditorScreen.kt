@@ -103,6 +103,9 @@ private enum class EditorTab(val label: String, val icon: ImageVector) {
     CROP("CROP", Icons.Outlined.Crop),
 }
 
+/** [selectedMaskId] sentinel for "show all masks composited" mode. */
+private const val PREVIEW_TARGET_ID = "__preview__"
+
 /**
  * PhotoEditor 메인:
  * - 한 장 사진에 4탭 보정 + 객체 단위 마스크 보정 지원.
@@ -138,10 +141,37 @@ fun PhotoEditorScreen(
     var vibeBusy by remember { mutableStateOf(false) }
     var vibeStatus by remember { mutableStateOf<String?>(null) }
 
+    // Preview (모든 마스크 합성 결과) 상태. CPU 렌더라 비동기.
+    var previewComposite by remember { mutableStateOf<Bitmap?>(null) }
+    var previewing by remember { mutableStateOf(false) }
+    val isPreviewMode = selectedMaskId == PREVIEW_TARGET_ID
+
     // Crop 적용된 프리뷰 + 마스크
     var croppedPreview by remember { mutableStateOf(previewBitmap) }
     LaunchedEffect(previewBitmap, crop) {
         croppedPreview = withContext(Dispatchers.IO) { applyCropTransform(previewBitmap, crop) }
+    }
+
+    LaunchedEffect(selectedMaskId, croppedPreview, masks) {
+        if (selectedMaskId != PREVIEW_TARGET_ID) {
+            previewComposite = null
+            previewing = false
+            return@LaunchedEffect
+        }
+        previewing = true
+        previewComposite = withContext(Dispatchers.IO) {
+            val scaledMasks = masks.map { m ->
+                val scaled = Bitmap.createScaledBitmap(
+                    m.featheredAlphaBitmap,
+                    croppedPreview.width,
+                    croppedPreview.height,
+                    true,
+                )
+                m to scaled
+            }
+            applyRecipeMasked(croppedPreview, globalParams, scaledMasks)
+        }
+        previewing = false
     }
 
     // 이미지가 들어오거나 crop 이 바뀔 때마다 인스턴스 자동 검출.
@@ -212,19 +242,37 @@ fun PhotoEditorScreen(
                 .background(PhotoColors.Canvas),
             contentAlignment = Alignment.Center,
         ) {
-            ImageGLView(
-                bitmap = croppedPreview,
-                global = globalParams,
-                // GL 합성에는 페더된 알파 — 보정 경계가 자연스럽게 fade.
-                maskBitmap = activeMask?.featheredAlphaBitmap,
-                mask = activeMask?.params,
-                modifier = Modifier.fillMaxSize(),
-            )
+            if (isPreviewMode) {
+                previewComposite?.let { composite ->
+                    Image(
+                        bitmap = composite.asImageBitmap(),
+                        contentDescription = "Composite preview",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (previewing) {
+                    CircularProgressIndicator(
+                        color = PhotoColors.PureWhite,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            } else {
+                ImageGLView(
+                    bitmap = croppedPreview,
+                    global = globalParams,
+                    // GL 합성에는 페더된 알파 — 보정 경계가 자연스럽게 fade.
+                    maskBitmap = activeMask?.featheredAlphaBitmap,
+                    mask = activeMask?.params,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
 
             // Lightroom 식 "활성 마스크 포커스": 마스크 *바깥* (원본 영역) 을 어둡게 깔아서
             // 어느 부분이 편집 대상인지 한눈에 보이게 한다. 마스크 안쪽은 투명이라
             // 슬라이더로 바뀌는 결과가 그대로 노출됨.
-            activeMask?.let { m ->
+            (if (isPreviewMode) null else activeMask)?.let { m ->
                 var flashing by remember(m.id) { mutableStateOf(true) }
                 LaunchedEffect(m.id) {
                     flashing = true
@@ -300,6 +348,21 @@ fun PhotoEditorScreen(
                     if (selectedMaskId == id) selectedMaskId = null
                 },
             )
+            if (isPreviewMode) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Composite preview · 모든 마스크가 합쳐진 결과입니다.\nGlobal 이나 마스크 칩을 누르면 다시 편집할 수 있어요.",
+                        color = PhotoColors.CoolSilver,
+                        fontSize = 13.sp,
+                    )
+                }
+            } else {
             TabStrip(tab = tab, onTabChange = { tab = it })
             Spacer(Modifier.height(8.dp))
             when (tab) {
@@ -332,6 +395,7 @@ fun PhotoEditorScreen(
                 EditorTab.COLOR -> ColorControls(targetParams)
                 EditorTab.FILTERS -> FiltersRow(targetParams)
                 EditorTab.CROP -> CropControls(crop, onChange = { crop = it })
+            }
             }
         }
     }
@@ -482,6 +546,12 @@ private fun MaskSelectorRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        TargetChip(
+            label = "Preview",
+            selected = selectedId == PREVIEW_TARGET_ID,
+            accent = Color(0xFF6BE3FF),
+            onClick = { onSelect(PREVIEW_TARGET_ID) },
+        )
         TargetChip(label = "Global", selected = selectedId == null, onClick = { onSelect(null) })
         for (m in masks) {
             TargetChip(label = m.label, selected = selectedId == m.id, onClick = { onSelect(m.id) }) {
@@ -514,15 +584,21 @@ private fun TargetChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    accent: Color? = null,
     onDelete: (() -> Unit)? = null,
 ) {
-    val bg = if (selected) PhotoColors.PureWhite else PhotoColors.DarkSurface
+    val bg = when {
+        selected && accent != null -> accent
+        selected -> PhotoColors.PureWhite
+        else -> PhotoColors.DarkSurface
+    }
     val fg = if (selected) PhotoColors.RunwayBlack else PhotoColors.PureWhite
+    val borderColor = if (accent != null && !selected) accent.copy(alpha = 0.6f) else PhotoColors.BorderDark
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
             .background(bg)
-            .border(1.dp, PhotoColors.BorderDark, RoundedCornerShape(50))
+            .border(1.dp, borderColor, RoundedCornerShape(50))
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
