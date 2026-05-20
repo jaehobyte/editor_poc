@@ -5,7 +5,6 @@ import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,17 +59,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.photorecipe.EditorParams
@@ -96,8 +91,9 @@ private enum class EditorTab(val label: String, val icon: ImageVector) {
 /**
  * PhotoEditor 메인:
  * - 한 장 사진에 4탭 보정 + 객체 단위 마스크 보정 지원.
- * - 비프리뷰 영역을 길게 누르면 그 지점에 InteractiveSegmenter 가 마스크 생성.
- * - 마스크 칩 (Global / Mask 1 / Mask 2 / ...) 으로 슬라이더 대상 전환.
+ * - 사진 로드 시 SegmentationEngine 이 ObjectDetector + DeepLab v3 로 자동 인스턴스
+ *   검출. 검출된 객체 칩을 탭하면 그 인스턴스의 마스크가 편집 대상으로 추가됨.
+ * - 마스크 칩 (Global / Person / Dog / ...) 으로 슬라이더 대상 전환.
  */
 @Composable
 fun PhotoEditorScreen(
@@ -117,9 +113,7 @@ fun PhotoEditorScreen(
     var tab by remember { mutableStateOf(EditorTab.ADJUST) }
 
     var saving by remember { mutableStateOf(false) }
-    var segmenting by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
-    var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var detectedInstances by remember { mutableStateOf<List<DetectedInstance>>(emptyList()) }
     var detecting by remember { mutableStateOf(false) }
 
@@ -133,7 +127,7 @@ fun PhotoEditorScreen(
     LaunchedEffect(croppedPreview) {
         detecting = true
         detectedInstances = withContext(Dispatchers.IO) {
-            runCatching { segmenter.detect(croppedPreview) }.getOrElse { emptyList() }
+            runCatching { segmenter.detectInstances(croppedPreview) }.getOrElse { emptyList() }
         }
         detecting = false
     }
@@ -193,47 +187,7 @@ fun PhotoEditorScreen(
                 .weight(1f)
                 .fillMaxWidth()
                 .clipToBounds()
-                .background(PhotoColors.Canvas)
-                .onSizeChanged { previewSize = it }
-                .pointerInput(croppedPreview) {
-                    detectTapGestures(
-                        onLongPress = { pos ->
-                            // 좌표 → 정규화 좌표 (이미지 영역 letterbox 고려)
-                            val (nx, ny) = mapToImageNorm(
-                                pos, previewSize, croppedPreview.width, croppedPreview.height,
-                            ) ?: return@detectTapGestures
-                            segmenting = true
-                            scope.launch {
-                                val r = runCatching {
-                                    withContext(Dispatchers.IO) {
-                                        segmenter.segment(croppedPreview, nx, ny)
-                                    }
-                                }
-                                segmenting = false
-                                r.fold(
-                                    onSuccess = { alpha ->
-                                        // 새 마스크의 파라미터는 현재 global 값 복사로 시작 — 사용자가
-                                        // 슬라이더로 마스크 파라미터를 바꾸자마자 해당 영역에 변화가 보이도록.
-                                        // (모두 0 으로 시작하면 global 효과까지 사라져서 슬라이더가 동작하지
-                                        // 않는 것처럼 보임.)
-                                        val maskParams = EditorParams().apply {
-                                            copyValuesFrom(globalParams)
-                                        }
-                                        val newMask = Mask(
-                                            id = "mask-${System.currentTimeMillis()}",
-                                            alphaBitmap = alpha,
-                                            params = maskParams,
-                                            label = "Mask ${masks.size + 1}",
-                                        )
-                                        masks = masks + newMask
-                                        selectedMaskId = newMask.id
-                                    },
-                                    onFailure = { toast = "Segmentation failed: ${it.message}" },
-                                )
-                            }
-                        },
-                    )
-                },
+                .background(PhotoColors.Canvas),
             contentAlignment = Alignment.Center,
         ) {
             ImageGLView(
@@ -280,18 +234,10 @@ fun PhotoEditorScreen(
                 )
             }
 
-            if (segmenting) {
-                Box(
-                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator(color = PhotoColors.PureWhite)
-                }
-            }
-            // 힌트 텍스트: 마스크가 없을 때만
-            if (masks.isEmpty() && !segmenting) {
+            // 힌트: 마스크가 없을 때만, 인스턴스 칩에서 선택하라고 안내.
+            if (masks.isEmpty() && !detecting && detectedInstances.isNotEmpty()) {
                 Text(
-                    text = "Long-press the image to mask an object",
+                    text = "Tap a detected object below to edit it",
                     color = PhotoColors.PureWhite.copy(alpha = 0.85f),
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier
@@ -310,34 +256,16 @@ fun PhotoEditorScreen(
                 detecting = detecting,
                 instances = detectedInstances,
                 onTap = { inst ->
-                    if (segmenting) return@DetectedInstancesRow
-                    segmenting = true
-                    scope.launch {
-                        val r = runCatching {
-                            withContext(Dispatchers.IO) {
-                                segmenter.segment(
-                                    croppedPreview,
-                                    inst.centerNormalized.first,
-                                    inst.centerNormalized.second,
-                                )
-                            }
-                        }
-                        segmenting = false
-                        r.fold(
-                            onSuccess = { alpha ->
-                                val maskParams = EditorParams().apply { copyValuesFrom(globalParams) }
-                                val newMask = Mask(
-                                    id = "mask-${System.currentTimeMillis()}",
-                                    alphaBitmap = alpha,
-                                    params = maskParams,
-                                    label = inst.label.replaceFirstChar { it.uppercase() },
-                                )
-                                masks = masks + newMask
-                                selectedMaskId = newMask.id
-                            },
-                            onFailure = { toast = "Segmentation failed: ${it.message}" },
-                        )
-                    }
+                    // alphaBitmap 은 detect 단계에서 이미 계산되어 있어서 IO 호출 불필요.
+                    val maskParams = EditorParams().apply { copyValuesFrom(globalParams) }
+                    val newMask = Mask(
+                        id = "mask-${System.currentTimeMillis()}",
+                        alphaBitmap = inst.alphaBitmap,
+                        params = maskParams,
+                        label = inst.label.replaceFirstChar { it.uppercase() },
+                    )
+                    masks = masks + newMask
+                    selectedMaskId = newMask.id
                 },
             )
             MaskSelectorRow(
@@ -372,32 +300,6 @@ fun PhotoEditorScreen(
             )
         }
     }
-}
-
-/**
- * Compose 영역 좌표 (px) → 이미지 정규화 좌표 [0,1] x [0,1].
- * ImageGLView 가 letterbox 로 그리므로 viewport 외 영역은 null 반환.
- */
-private fun mapToImageNorm(
-    pos: Offset,
-    viewSize: IntSize,
-    imageW: Int,
-    imageH: Int,
-): Pair<Float, Float>? {
-    if (viewSize.width == 0 || viewSize.height == 0) return null
-    val viewAspect = viewSize.width.toFloat() / viewSize.height
-    val imageAspect = imageW.toFloat() / imageH
-    val (vw, vh) = if (imageAspect > viewAspect) {
-        viewSize.width to (viewSize.width / imageAspect).toInt()
-    } else {
-        (viewSize.height * imageAspect).toInt() to viewSize.height
-    }
-    val vx = (viewSize.width - vw) / 2
-    val vy = (viewSize.height - vh) / 2
-    val lx = pos.x - vx
-    val ly = pos.y - vy
-    if (lx < 0f || ly < 0f || lx > vw || ly > vh) return null
-    return (lx / vw).coerceIn(0f, 1f) to (ly / vh).coerceIn(0f, 1f)
 }
 
 @Composable
