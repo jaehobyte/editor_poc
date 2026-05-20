@@ -94,6 +94,8 @@ fun EditorScreen(
     var tab by remember { mutableStateOf(EditorTab.TONE) }
     var saving by remember { mutableStateOf(false) }
     var savedToast by remember { mutableStateOf<String?>(null) }
+    // 비교용 — showOriginal 일 때 identity params 를 사용.
+    val identityParams = remember { EditorParams() }
 
     // 초기 진입 시 자동으로 1회 애니메이션 적용 — "magic moment".
     LaunchedEffect(Unit) {
@@ -173,16 +175,7 @@ fun EditorScreen(
         ) {
             ImageGLView(
                 bitmap = inputBitmap,
-                temperatureUi = if (showOriginal) 0f else params.temperature,
-                contrastUi    = if (showOriginal) 0f else params.contrast,
-                tintUi        = if (showOriginal) 0f else params.tint,
-                saturationUi  = if (showOriginal) 0f else params.saturation,
-                brightnessUi  = if (showOriginal) 0f else params.brightness,
-                exposureUi    = if (showOriginal) 0f else params.exposure,
-                highlightsUi  = if (showOriginal) 0f else params.highlights,
-                shadowsUi     = if (showOriginal) 0f else params.shadows,
-                colorTuningParams21 = params.colorTuning,
-                colorTuningOn = params.colorTuningEnabled && !showOriginal,
+                global = if (showOriginal) identityParams else params,
                 modifier = Modifier.fillMaxSize(),
             )
             if (showOriginal) {

@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.example.photorecipe.gemini.GeminiImageClient
+import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.AppRoute
 import com.example.photorecipe.ui.HomeScreen
@@ -57,6 +58,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val generator = remember { RecipeGenerator(context) }
     val gemini = remember { GeminiImageClient(BuildConfig.GEMINI_KEY) }
+    val segmenter = remember { SegmentationEngine.create(context) }
 
     var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
 
@@ -78,6 +80,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxSize(),
             )
             AppRoute.PhotoEditor -> PhotoEditorFlow(
+                segmenter = segmenter,
                 onExit = { route = AppRoute.Home },
                 modifier = Modifier.fillMaxSize(),
             )

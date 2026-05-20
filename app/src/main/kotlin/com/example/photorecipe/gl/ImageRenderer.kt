@@ -11,43 +11,77 @@ import javax.microedition.khronos.opengles.GL10
 import android.opengl.GLUtils as AGLUtils
 
 /**
- * Sprint 1: 한 장의 비트맵을 풀스크린 quad에 텍스처로 렌더링.
- * 효과는 없음 — 다음 Sprint에서 효과 셰이더가 이 자리를 대체함.
+ * Multi-target renderer: applies the same 9-stage pipeline TWICE per pixel —
+ * once with the "global" parameter set, once with the "mask" parameter set —
+ * and mixes them by the mask alpha when a mask texture is provided.
  */
 class ImageRenderer : GLSurfaceView.Renderer {
 
+    // ─── upload requests (any thread → GL thread) ────────────────────
     private val pendingBitmap = AtomicReference<Bitmap?>(null)
+    private val pendingMaskBitmap = AtomicReference<Bitmap?>(null)
+    private val pendingColorLut0 = AtomicReference<FloatArray?>(null)
+    private val pendingColorLut1 = AtomicReference<FloatArray?>(null)
 
-    // 현재 적용할 효과 파라미터. identity = passthrough.
-    @Volatile private var wb = floatArrayOf(1f, 1f, 1f)
-    @Volatile private var contrast = 1f
-    @Volatile private var tint = 0f
-    @Volatile private var saturation = identityMat3()
-    @Volatile private var brightness = 0f
-    @Volatile private var exposure = 0f
-    @Volatile private var highlights = 0f
-    @Volatile private var shadows = 0f
-    @Volatile private var colorTuningOn = false
-    private val pendingColorLut = AtomicReference<FloatArray?>(null)
+    // ─── global params (target index 0) ──────────────────────────────
+    @Volatile private var wb0 = floatArrayOf(1f, 1f, 1f)
+    @Volatile private var contrast0 = 1f
+    @Volatile private var tint0 = 0f
+    @Volatile private var saturation0 = identityMat3()
+    @Volatile private var brightness0 = 0f
+    @Volatile private var exposure0 = 0f
+    @Volatile private var highlights0 = 0f
+    @Volatile private var shadows0 = 0f
+    @Volatile private var colorTuningOn0 = false
 
+    // ─── mask params (target index 1) ─────────────────────────────────
+    @Volatile private var wb1 = floatArrayOf(1f, 1f, 1f)
+    @Volatile private var contrast1 = 1f
+    @Volatile private var tint1 = 0f
+    @Volatile private var saturation1 = identityMat3()
+    @Volatile private var brightness1 = 0f
+    @Volatile private var exposure1 = 0f
+    @Volatile private var highlights1 = 0f
+    @Volatile private var shadows1 = 0f
+    @Volatile private var colorTuningOn1 = false
+    @Volatile private var hasMask = false
+
+    // ─── GL handles ──────────────────────────────────────────────────
     private var program = 0
     private var posLoc = 0
     private var uvLoc = 0
     private var texUniform = 0
-    private var wbUniform = 0
-    private var contrastUniform = 0
-    private var tintUniform = 0
-    private var saturationUniform = 0
-    private var brightnessUniform = 0
-    private var exposureUniform = 0
-    private var highlightsUniform = 0
-    private var shadowsUniform = 0
-    private var colorLutUniform = 0
-    private var colorTuningOnUniform = 0
-    private var colorLutTextureId = 0
+    // Global uniforms
+    private var u_wb0 = 0
+    private var u_contrast0 = 0
+    private var u_tint0 = 0
+    private var u_saturation0 = 0
+    private var u_brightness0 = 0
+    private var u_exposure0 = 0
+    private var u_highlights0 = 0
+    private var u_shadows0 = 0
+    private var u_colorLut0 = 0
+    private var u_colorTuningOn0 = 0
+    // Mask uniforms
+    private var u_wb1 = 0
+    private var u_contrast1 = 0
+    private var u_tint1 = 0
+    private var u_saturation1 = 0
+    private var u_brightness1 = 0
+    private var u_exposure1 = 0
+    private var u_highlights1 = 0
+    private var u_shadows1 = 0
+    private var u_colorLut1 = 0
+    private var u_colorTuningOn1 = 0
+    private var u_mask = 0
+    private var u_hasMask = 0
 
-    private var textureId = 0
+    private var imgTextureId = 0
+    private var maskTextureId = 0
+    private var colorLut0TextureId = 0
+    private var colorLut1TextureId = 0
     private var hasTexture = false
+    private var hasMaskTexture = false
 
     private var vao = 0
     private var vbo = 0
@@ -57,55 +91,68 @@ class ImageRenderer : GLSurfaceView.Renderer {
     private var imageWidth = 0
     private var imageHeight = 0
 
-    /** 비트맵 업로드 요청. GL 스레드에서 다음 frame에 처리됨. */
-    fun setBitmap(bitmap: Bitmap) {
-        pendingBitmap.set(bitmap)
-    }
+    // ─── public API ──────────────────────────────────────────────────
 
-    /** Temperature WB 곱셈 계수 업데이트 (`wbMultipliers` 결과). */
-    fun setWbMultipliers(wb: FloatArray) {
-        require(wb.size == 3) { "wb must have 3 elements" }
-        this.wb = wb
-    }
-
-    /** Contrast 곡선 계수 업데이트 (`contrastCurve` 결과). 1.0 = identity. */
-    fun setContrastCurve(curve: Float) {
-        this.contrast = curve
-    }
-
-    /** Tint UI 값 직접 전달 [-100, 100]. 0 = identity. 셰이더가 동일한 수식을 실행. */
-    fun setTintUi(ui: Float) {
-        this.tint = ui
-    }
-
-    /** Saturation 행렬 (`saturationMatrix` 의 9-element column-major 결과). */
-    fun setSaturationMatrix(m: FloatArray) {
-        require(m.size == 9) { "saturation matrix must have 9 elements" }
-        this.saturation = m
-    }
-
-    /** Brightness / Exposure / Highlights / Shadows UI 값 — 각 [-100, 100], 0 = identity. */
-    fun setLumaParams(brightnessUi: Float, exposureUi: Float, highlightsUi: Float, shadowsUi: Float) {
-        this.brightness = brightnessUi.coerceIn(-100f, 100f)
-        this.exposure = exposureUi.coerceIn(-100f, 100f)
-        this.highlights = highlightsUi.coerceIn(-100f, 100f)
-        this.shadows = shadowsUi.coerceIn(-100f, 100f)
-    }
+    fun setBitmap(bitmap: Bitmap) { pendingBitmap.set(bitmap) }
 
     /**
-     * Color tuning 토글. enabled=true 면 [lut] (361*4 RGBA32F 평탄 배열) 을 다음 frame 에서
-     * 업로드하고 셰이더가 적용. lut 가 null 이면 기존 텍스처 유지.
+     * Set or clear the mask. Pass null to disable masking (returns to global-only).
      */
-    fun setColorTuning(enabled: Boolean, lut: FloatArray?) {
-        colorTuningOn = enabled
-        if (lut != null) {
-            require(lut.size == 361 * 4) { "color LUT must be 361*4 = 1444 elements" }
-            pendingColorLut.set(lut)
+    fun setMask(bitmap: Bitmap?) {
+        if (bitmap == null) {
+            hasMask = false
+            // signal "clear" — drawn next frame
+        } else {
+            hasMask = true
+            pendingMaskBitmap.set(bitmap)
         }
     }
 
+    /** Global (target 0) — applied to entire image, then optionally overridden by mask. */
+    fun setGlobalParams(
+        wb: FloatArray, contrast: Float, tint: Float, saturation: FloatArray,
+        brightness: Float, exposure: Float, highlights: Float, shadows: Float,
+        colorTuningOn: Boolean, colorLut: FloatArray?,
+    ) {
+        wb0 = wb
+        contrast0 = contrast
+        tint0 = tint.coerceIn(-100f, 100f)
+        saturation0 = saturation
+        brightness0 = brightness.coerceIn(-100f, 100f)
+        exposure0 = exposure.coerceIn(-100f, 100f)
+        highlights0 = highlights.coerceIn(-100f, 100f)
+        shadows0 = shadows.coerceIn(-100f, 100f)
+        colorTuningOn0 = colorTuningOn
+        if (colorLut != null) {
+            require(colorLut.size == 361 * 4)
+            pendingColorLut0.set(colorLut)
+        }
+    }
+
+    /** Mask (target 1). Effective only when a mask bitmap is also set. */
+    fun setMaskParams(
+        wb: FloatArray, contrast: Float, tint: Float, saturation: FloatArray,
+        brightness: Float, exposure: Float, highlights: Float, shadows: Float,
+        colorTuningOn: Boolean, colorLut: FloatArray?,
+    ) {
+        wb1 = wb
+        contrast1 = contrast
+        tint1 = tint.coerceIn(-100f, 100f)
+        saturation1 = saturation
+        brightness1 = brightness.coerceIn(-100f, 100f)
+        exposure1 = exposure.coerceIn(-100f, 100f)
+        highlights1 = highlights.coerceIn(-100f, 100f)
+        shadows1 = shadows.coerceIn(-100f, 100f)
+        colorTuningOn1 = colorTuningOn
+        if (colorLut != null) {
+            require(colorLut.size == 361 * 4)
+            pendingColorLut1.set(colorLut)
+        }
+    }
+
+    // ─── Renderer ────────────────────────────────────────────────────
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        // DESIGN.md: 캔버스 영역은 중간 회색 (이미지 색상 인식 방해 방지)
         GLES30.glClearColor(0.16f, 0.16f, 0.16f, 1f)
 
         val vs = compileShader(GLES30.GL_VERTEX_SHADER, PASSTHROUGH_VERT)
@@ -117,40 +164,40 @@ class ImageRenderer : GLSurfaceView.Renderer {
         posLoc = GLES30.glGetAttribLocation(program, "a_pos")
         uvLoc = GLES30.glGetAttribLocation(program, "a_uv")
         texUniform = GLES30.glGetUniformLocation(program, "u_tex")
-        wbUniform = GLES30.glGetUniformLocation(program, "u_wb")
-        contrastUniform = GLES30.glGetUniformLocation(program, "u_contrast")
-        tintUniform = GLES30.glGetUniformLocation(program, "u_tint")
-        saturationUniform = GLES30.glGetUniformLocation(program, "u_saturation")
-        brightnessUniform = GLES30.glGetUniformLocation(program, "u_brightness")
-        exposureUniform   = GLES30.glGetUniformLocation(program, "u_exposure")
-        highlightsUniform = GLES30.glGetUniformLocation(program, "u_highlights")
-        shadowsUniform    = GLES30.glGetUniformLocation(program, "u_shadows")
-        colorLutUniform        = GLES30.glGetUniformLocation(program, "u_colorLut")
-        colorTuningOnUniform   = GLES30.glGetUniformLocation(program, "u_colorTuningOn")
+
+        u_wb0 = GLES30.glGetUniformLocation(program, "u_wb0")
+        u_contrast0 = GLES30.glGetUniformLocation(program, "u_contrast0")
+        u_tint0 = GLES30.glGetUniformLocation(program, "u_tint0")
+        u_saturation0 = GLES30.glGetUniformLocation(program, "u_saturation0")
+        u_brightness0 = GLES30.glGetUniformLocation(program, "u_brightness0")
+        u_exposure0 = GLES30.glGetUniformLocation(program, "u_exposure0")
+        u_highlights0 = GLES30.glGetUniformLocation(program, "u_highlights0")
+        u_shadows0 = GLES30.glGetUniformLocation(program, "u_shadows0")
+        u_colorLut0 = GLES30.glGetUniformLocation(program, "u_colorLut0")
+        u_colorTuningOn0 = GLES30.glGetUniformLocation(program, "u_colorTuningOn0")
+
+        u_wb1 = GLES30.glGetUniformLocation(program, "u_wb1")
+        u_contrast1 = GLES30.glGetUniformLocation(program, "u_contrast1")
+        u_tint1 = GLES30.glGetUniformLocation(program, "u_tint1")
+        u_saturation1 = GLES30.glGetUniformLocation(program, "u_saturation1")
+        u_brightness1 = GLES30.glGetUniformLocation(program, "u_brightness1")
+        u_exposure1 = GLES30.glGetUniformLocation(program, "u_exposure1")
+        u_highlights1 = GLES30.glGetUniformLocation(program, "u_highlights1")
+        u_shadows1 = GLES30.glGetUniformLocation(program, "u_shadows1")
+        u_colorLut1 = GLES30.glGetUniformLocation(program, "u_colorLut1")
+        u_colorTuningOn1 = GLES30.glGetUniformLocation(program, "u_colorTuningOn1")
+
+        u_mask = GLES30.glGetUniformLocation(program, "u_mask")
+        u_hasMask = GLES30.glGetUniformLocation(program, "u_hasMask")
 
         setupQuad()
-        setupTexture()
-        setupColorLutTexture()
-    }
-
-    private fun setupColorLutTexture() {
-        val tex = IntArray(1); GLES30.glGenTextures(1, tex, 0); colorLutTextureId = tex[0]
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLutTextureId)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_NEAREST)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_NEAREST)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
-        // 초기 zero LUT 업로드 (color tuning 꺼져 있어도 sampler binding 은 필요).
-        val zeros = java.nio.ByteBuffer.allocateDirect(361 * 4 * 4)
-            .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
-        GLES30.glTexImage2D(
-            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
-            361, 1, 0, GLES30.GL_RGBA, GLES30.GL_FLOAT, zeros,
-        )
+        imgTextureId = makeRgbaTexture()
+        maskTextureId = makeRgbaTexture()
+        colorLut0TextureId = makeColorLutTexture()
+        colorLut1TextureId = makeColorLutTexture()
     }
 
     private fun setupQuad() {
-        // Triangle strip 풀스크린 quad. UV.y 는 비트맵 origin(top-left)에 맞게 뒤집음.
         val verts = floatArrayOf(
             -1f, -1f, 0f, 1f,
              1f, -1f, 1f, 1f,
@@ -176,45 +223,86 @@ class ImageRenderer : GLSurfaceView.Renderer {
         GLES30.glBindVertexArray(0)
     }
 
-    private fun setupTexture() {
-        val tex = IntArray(1); GLES30.glGenTextures(1, tex, 0); textureId = tex[0]
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
+    private fun makeRgbaTexture(): Int {
+        val tex = IntArray(1); GLES30.glGenTextures(1, tex, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex[0])
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        return tex[0]
+    }
+
+    private fun makeColorLutTexture(): Int {
+        val tex = IntArray(1); GLES30.glGenTextures(1, tex, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex[0])
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_NEAREST)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_NEAREST)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        val zeros = ByteBuffer.allocateDirect(361 * 4 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA32F,
+            361, 1, 0, GLES30.GL_RGBA, GLES30.GL_FLOAT, zeros,
+        )
+        return tex[0]
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        viewWidth = width
-        viewHeight = height
+        viewWidth = width; viewHeight = height
         applyViewport()
     }
 
     override fun onDrawFrame(gl: GL10?) {
         pendingBitmap.getAndSet(null)?.let { uploadBitmap(it) }
-        pendingColorLut.getAndSet(null)?.let { uploadColorLut(it) }
+        pendingMaskBitmap.getAndSet(null)?.let { uploadMask(it) }
+        pendingColorLut0.getAndSet(null)?.let { uploadColorLut(colorLut0TextureId, it) }
+        pendingColorLut1.getAndSet(null)?.let { uploadColorLut(colorLut1TextureId, it) }
 
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         if (!hasTexture) return
 
         GLES30.glUseProgram(program)
+
+        // Bind 4 texture units
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, imgTextureId)
         GLES30.glUniform1i(texUniform, 0)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLutTextureId)
-        GLES30.glUniform1i(colorLutUniform, 1)
-        GLES30.glUniform1i(colorTuningOnUniform, if (colorTuningOn) 1 else 0)
-        val wbSnapshot = wb
-        GLES30.glUniform3f(wbUniform, wbSnapshot[0], wbSnapshot[1], wbSnapshot[2])
-        GLES30.glUniform1f(contrastUniform, contrast)
-        GLES30.glUniform1f(tintUniform, tint.coerceIn(-100f, 100f))
-        GLES30.glUniformMatrix3fv(saturationUniform, 1, false, saturation, 0)
-        GLES30.glUniform1f(brightnessUniform, brightness)
-        GLES30.glUniform1f(exposureUniform,   exposure)
-        GLES30.glUniform1f(highlightsUniform, highlights)
-        GLES30.glUniform1f(shadowsUniform,    shadows)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLut0TextureId)
+        GLES30.glUniform1i(u_colorLut0, 1)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLut1TextureId)
+        GLES30.glUniform1i(u_colorLut1, 2)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTextureId)
+        GLES30.glUniform1i(u_mask, 3)
+
+        // Global
+        GLES30.glUniform3f(u_wb0, wb0[0], wb0[1], wb0[2])
+        GLES30.glUniform1f(u_contrast0, contrast0)
+        GLES30.glUniform1f(u_tint0, tint0)
+        GLES30.glUniformMatrix3fv(u_saturation0, 1, false, saturation0, 0)
+        GLES30.glUniform1f(u_brightness0, brightness0)
+        GLES30.glUniform1f(u_exposure0, exposure0)
+        GLES30.glUniform1f(u_highlights0, highlights0)
+        GLES30.glUniform1f(u_shadows0, shadows0)
+        GLES30.glUniform1i(u_colorTuningOn0, if (colorTuningOn0) 1 else 0)
+
+        // Mask
+        GLES30.glUniform3f(u_wb1, wb1[0], wb1[1], wb1[2])
+        GLES30.glUniform1f(u_contrast1, contrast1)
+        GLES30.glUniform1f(u_tint1, tint1)
+        GLES30.glUniformMatrix3fv(u_saturation1, 1, false, saturation1, 0)
+        GLES30.glUniform1f(u_brightness1, brightness1)
+        GLES30.glUniform1f(u_exposure1, exposure1)
+        GLES30.glUniform1f(u_highlights1, highlights1)
+        GLES30.glUniform1f(u_shadows1, shadows1)
+        GLES30.glUniform1i(u_colorTuningOn1, if (colorTuningOn1) 1 else 0)
+
+        GLES30.glUniform1i(u_hasMask, if (hasMask && hasMaskTexture) 1 else 0)
+
         GLES30.glBindVertexArray(vao)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
         GLES30.glBindVertexArray(0)
@@ -224,24 +312,29 @@ class ImageRenderer : GLSurfaceView.Renderer {
     private fun uploadBitmap(bitmap: Bitmap) {
         imageWidth = bitmap.width
         imageHeight = bitmap.height
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, imgTextureId)
         AGLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
         hasTexture = true
         applyViewport()
     }
 
-    private fun uploadColorLut(lut: FloatArray) {
-        val buf = java.nio.ByteBuffer.allocateDirect(lut.size * 4)
-            .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
+    private fun uploadMask(bitmap: Bitmap) {
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTextureId)
+        AGLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
+        hasMaskTexture = true
+    }
+
+    private fun uploadColorLut(textureId: Int, lut: FloatArray) {
+        val buf = ByteBuffer.allocateDirect(lut.size * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
         buf.put(lut).rewind()
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, colorLutTextureId)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textureId)
         GLES30.glTexSubImage2D(
             GLES30.GL_TEXTURE_2D, 0, 0, 0,
             361, 1, GLES30.GL_RGBA, GLES30.GL_FLOAT, buf,
         )
     }
 
-    /** 이미지 aspect 를 유지하면서 뷰포트를 중앙 정렬 (letterbox). */
     private fun applyViewport() {
         if (viewWidth == 0 || viewHeight == 0 || imageWidth == 0 || imageHeight == 0) {
             GLES30.glViewport(0, 0, viewWidth, viewHeight)

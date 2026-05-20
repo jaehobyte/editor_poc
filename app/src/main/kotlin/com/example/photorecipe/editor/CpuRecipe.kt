@@ -90,3 +90,64 @@ fun applyRecipe(input: Bitmap, p: EditorParams): Bitmap {
     out.setPixels(pixels, 0, w, 0, 0, w, h)
     return out
 }
+
+/**
+ * Multi-mask rendering used for export.
+ *
+ * For each pixel:
+ *   base = applyRecipe(input, globalParams)
+ *   for mask in masks:
+ *     a = mask.alphaBitmap(pixel).R / 255
+ *     if a > 0:
+ *       maskApplied = applyRecipe(input, mask.params)
+ *       base = mix(base, maskApplied, a)
+ *   pixel = base
+ *
+ * Implementation note: instead of re-running the 9-stage pipeline per
+ * mask per pixel (slow), we pre-render the full pipeline once per mask
+ * into a bitmap and then composite linearly. Memory cost: (N+1) bitmaps
+ * the size of [input]. Acceptable for export at ≤ 4096px on the long side.
+ */
+fun applyRecipeMasked(
+    input: android.graphics.Bitmap,
+    globalParams: com.example.photorecipe.EditorParams,
+    masks: List<Pair<com.example.photorecipe.ui.photoeditor.Mask, android.graphics.Bitmap>>,
+): android.graphics.Bitmap {
+    val w = input.width
+    val h = input.height
+    val n = w * h
+
+    // 1. base = global pipeline
+    val baseRendered = applyRecipe(input, globalParams)
+    val basePixels = IntArray(n)
+    baseRendered.getPixels(basePixels, 0, w, 0, 0, w, h)
+
+    // 2. for each mask, render the pipeline with that mask's params; then blend.
+    for ((mask, scaledAlpha) in masks) {
+        val maskApplied = applyRecipe(input, mask.params)
+        val maskPixels = IntArray(n)
+        maskApplied.getPixels(maskPixels, 0, w, 0, 0, w, h)
+
+        val alphaPixels = IntArray(n)
+        scaledAlpha.getPixels(alphaPixels, 0, w, 0, 0, w, h)
+
+        for (i in 0 until n) {
+            val alpha = ((alphaPixels[i] ushr 16) and 0xFF) / 255f
+            if (alpha < 0.001f) continue
+            val br = (basePixels[i] ushr 16) and 0xFF
+            val bg = (basePixels[i] ushr 8) and 0xFF
+            val bb = basePixels[i] and 0xFF
+            val mr = (maskPixels[i] ushr 16) and 0xFF
+            val mg = (maskPixels[i] ushr 8) and 0xFF
+            val mb = maskPixels[i] and 0xFF
+            val nr = (br + (mr - br) * alpha).toInt().coerceIn(0, 255)
+            val ng = (bg + (mg - bg) * alpha).toInt().coerceIn(0, 255)
+            val nb = (bb + (mb - bb) * alpha).toInt().coerceIn(0, 255)
+            basePixels[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+        }
+    }
+
+    val out = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+    out.setPixels(basePixels, 0, w, 0, 0, w, h)
+    return out
+}

@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.photorecipe.EditorParams
 import com.example.photorecipe.editor.buildColorTuningLut
 import com.example.photorecipe.editor.contrastCurve
 import com.example.photorecipe.editor.saturationMatrix
@@ -13,21 +14,19 @@ import com.example.photorecipe.editor.wbMultipliers
 import com.example.photorecipe.gl.ImageRenderer
 
 /**
- * Compose 안에 GLSurfaceView 를 띄우는 래퍼. 모든 ui 값은 [-100, 100], 0 = identity.
+ * Compose wrapper around the GL renderer.
+ *
+ * @param global  Global adjustments applied to the entire image.
+ * @param maskBitmap  Optional grayscale mask (same aspect as [bitmap], R = alpha).
+ * @param mask  When [maskBitmap] is set, these adjustments mix into the masked
+ *              region by the mask alpha. Required if [maskBitmap] is non-null.
  */
 @Composable
 fun ImageGLView(
     bitmap: Bitmap,
-    temperatureUi: Float = 0f,
-    contrastUi: Float = 0f,
-    tintUi: Float = 0f,
-    saturationUi: Float = 0f,
-    brightnessUi: Float = 0f,
-    exposureUi: Float = 0f,
-    highlightsUi: Float = 0f,
-    shadowsUi: Float = 0f,
-    colorTuningParams21: FloatArray? = null,
-    colorTuningOn: Boolean = false,
+    global: EditorParams,
+    maskBitmap: Bitmap? = null,
+    mask: EditorParams? = null,
     modifier: Modifier = Modifier,
 ) {
     val renderer = remember { ImageRenderer() }
@@ -43,13 +42,38 @@ fun ImageGLView(
         },
         update = { view ->
             renderer.setBitmap(bitmap)
-            renderer.setWbMultipliers(wbMultipliers(temperatureUi))
-            renderer.setContrastCurve(contrastCurve(contrastUi))
-            renderer.setTintUi(tintUi)
-            renderer.setSaturationMatrix(saturationMatrix(saturationUi))
-            renderer.setLumaParams(brightnessUi, exposureUi, highlightsUi, shadowsUi)
-            val lut = colorTuningParams21?.let { buildColorTuningLut(it) }
-            renderer.setColorTuning(colorTuningOn, lut)
+
+            renderer.setGlobalParams(
+                wb = wbMultipliers(global.temperature),
+                contrast = contrastCurve(global.contrast),
+                tint = global.tint,
+                saturation = saturationMatrix(global.saturation),
+                brightness = global.brightness,
+                exposure = global.exposure,
+                highlights = global.highlights,
+                shadows = global.shadows,
+                colorTuningOn = global.colorTuningEnabled,
+                colorLut = buildColorTuningLut(global.colorTuning),
+            )
+
+            if (maskBitmap != null && mask != null) {
+                renderer.setMaskParams(
+                    wb = wbMultipliers(mask.temperature),
+                    contrast = contrastCurve(mask.contrast),
+                    tint = mask.tint,
+                    saturation = saturationMatrix(mask.saturation),
+                    brightness = mask.brightness,
+                    exposure = mask.exposure,
+                    highlights = mask.highlights,
+                    shadows = mask.shadows,
+                    colorTuningOn = mask.colorTuningEnabled,
+                    colorLut = buildColorTuningLut(mask.colorTuning),
+                )
+                renderer.setMask(maskBitmap)
+            } else {
+                renderer.setMask(null)
+            }
+
             view.requestRender()
         },
     )

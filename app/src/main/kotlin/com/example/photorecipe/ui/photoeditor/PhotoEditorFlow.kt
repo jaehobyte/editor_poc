@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.ui.theme.PhotoColors
 import com.example.photorecipe.util.decodeBitmapWithOrientation
 import com.example.photorecipe.util.downscaleForGL
@@ -32,7 +33,11 @@ private sealed interface PePhase {
 }
 
 @Composable
-fun PhotoEditorFlow(onExit: () -> Unit, modifier: Modifier = Modifier) {
+fun PhotoEditorFlow(
+    segmenter: SegmentationEngine,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -75,6 +80,7 @@ fun PhotoEditorFlow(onExit: () -> Unit, modifier: Modifier = Modifier) {
                 PhotoEditorScreen(
                     originalUri = p.uri,
                     previewBitmap = p.preview,
+                    segmenter = segmenter,
                     onBack = { phase = PePhase.Picker },
                 )
             }
