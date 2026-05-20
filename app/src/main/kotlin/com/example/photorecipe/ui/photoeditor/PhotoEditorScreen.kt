@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -67,8 +68,11 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -88,6 +92,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 import android.app.Activity
 import android.content.Intent
@@ -271,13 +276,74 @@ fun PhotoEditorScreen(
             contentAlignment = Alignment.Center,
         ) {
             if (isPreviewMode) {
-                previewComposite?.let { composite ->
-                    Image(
-                        bitmap = composite.asImageBitmap(),
-                        contentDescription = "Composite preview",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                // 꾹 누르고 있으면 원본으로 fade — before/after 비교용.
+                var showingOriginal by remember { mutableStateOf(false) }
+                val originalAlpha by animateFloatAsState(
+                    targetValue = if (showingOriginal) 1f else 0f,
+                    animationSpec = tween(durationMillis = 180),
+                    label = "preview-compare-fade",
+                )
+                val haptic = LocalHapticFeedback.current
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(previewComposite) {
+                            detectTapGestures(
+                                onPress = {
+                                    // long-press 임계 안에서 손이 떼지면 long press 가
+                                    // 아닌 거고 (null 아닌 값 반환), 그 전에 timeout 이면
+                                    // 누른 채 머무는 상태 → 원본 토글.
+                                    val released = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                        tryAwaitRelease()
+                                        true
+                                    }
+                                    if (released == null) {
+                                        showingOriginal = true
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        tryAwaitRelease()
+                                        showingOriginal = false
+                                    }
+                                },
+                            )
+                        },
+                ) {
+                    previewComposite?.let { composite ->
+                        Image(
+                            bitmap = composite.asImageBitmap(),
+                            contentDescription = "Composite preview",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                    if (originalAlpha > 0.001f) {
+                        Image(
+                            bitmap = croppedPreview.asImageBitmap(),
+                            contentDescription = "Original photo (long-press to compare)",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(originalAlpha),
+                        )
+                    }
+                }
+                if (originalAlpha > 0.001f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 16.dp)
+                            .alpha(originalAlpha)
+                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50))
+                            .padding(horizontal = 12.dp, vertical = 5.dp),
+                    ) {
+                        Text(
+                            text = "ORIGINAL",
+                            color = PhotoColors.PureWhite,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 1.2.sp,
+                        )
+                    }
                 }
                 if (previewing) {
                     CircularProgressIndicator(
@@ -385,7 +451,7 @@ fun PhotoEditorScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "Composite preview · 모든 마스크가 합쳐진 결과입니다.\nGlobal 이나 마스크 칩을 누르면 다시 편집할 수 있어요.",
+                        text = "Composite preview · 모든 마스크가 합쳐진 결과입니다.\n꾹 누르면 원본과 비교할 수 있고, Global 이나 마스크 칩을 누르면 편집으로 돌아갑니다.",
                         color = PhotoColors.CoolSilver,
                         fontSize = 13.sp,
                     )
