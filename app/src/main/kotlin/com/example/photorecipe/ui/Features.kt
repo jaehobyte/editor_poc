@@ -6,7 +6,6 @@ import androidx.compose.ui.graphics.Color
 sealed interface AppRoute {
     data object Home : AppRoute
     data object PhotoRecipe : AppRoute
-    data object CameraGen : AppRoute
     data object PhotoEditor : AppRoute
 }
 
@@ -31,16 +30,6 @@ val FEATURES: List<FeatureCard> = listOf(
             Color(0xFFFFD27A),
             Color(0xFFFF6B6B),
             Color(0xFFB26BFF),
-        ),
-    ),
-    FeatureCard(
-        route = AppRoute.CameraGen,
-        name = "Camera\nPrompt",
-        subtitle = "Shoot, ask, generate",
-        gradient = listOf(
-            Color(0xFF6BE3FF),
-            Color(0xFF6B7BFF),
-            Color(0xFF9D6BFF),
         ),
     ),
     FeatureCard(
