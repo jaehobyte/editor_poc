@@ -981,6 +981,7 @@ private suspend fun applyVibePrompt(
         }
         if (params == null) continue
         applyChanges(params, edit.changes)
+        applyColorTuning(params, edit.colorTuning)
 
         if (target != "global" && firstAffectedId == null) {
             firstAffectedId = mutableMasks.firstOrNull { it.label.equals(target, ignoreCase = true) }?.id
@@ -988,7 +989,13 @@ private suspend fun applyVibePrompt(
 
         if (appliedSummary.isNotEmpty()) appliedSummary.append(" · ")
         appliedSummary.append(target).append(": ")
-            .append(edit.changes.entries.joinToString(", ") { (k, v) -> "$k=${v.toInt()}" })
+        val toneStr = edit.changes.entries.joinToString(", ") { (k, v) -> "$k=${v.toInt()}" }
+        val tuneStr = edit.colorTuning.entries.joinToString(", ") { (band, channels) ->
+            "$band(" + channels.entries.joinToString(",") { (c, v) -> "${c.first()}=${v.toInt()}" } + ")"
+        }
+        appliedSummary.append(
+            listOf(toneStr, tuneStr).filter { it.isNotEmpty() }.joinToString(", "),
+        )
     }
 
     val status = if (appliedSummary.isEmpty()) {
@@ -1017,5 +1024,23 @@ private fun applyChanges(p: EditorParams, changes: Map<String, Float>) {
             "highlights" -> p.highlights = v
             "shadows" -> p.shadows = v
         }
+    }
+}
+
+private fun applyColorTuning(p: EditorParams, tuning: Map<String, Map<String, Float>>) {
+    if (tuning.isEmpty()) return
+    val next = p.colorTuning.copyOf()
+    var changed = false
+    for ((bandName, channels) in tuning) {
+        val bi = com.example.photorecipe.vibe.VibeClient.BAND_INDEX[bandName] ?: continue
+        for ((channelName, value) in channels) {
+            val co = com.example.photorecipe.vibe.VibeClient.CHANNEL_OFFSET[channelName] ?: continue
+            next[bi * 3 + co] = value.coerceIn(-100f, 100f)
+            changed = true
+        }
+    }
+    if (changed) {
+        p.colorTuning = next
+        p.colorTuningEnabled = true
     }
 }
