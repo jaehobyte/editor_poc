@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +61,16 @@ private fun AppRoot(modifier: Modifier = Modifier) {
     val gemini = remember { GeminiImageClient(BuildConfig.GEMINI_KEY) }
     val segmenter = remember { SegmentationEngine.create(context) }
     val vibeClient = remember { VibeClient(BuildConfig.GEMINI_KEY) }
+
+    // Composition 이 해제될 때 TFLite Interpreter + MediaPipe task runner 네이티브
+    // 핸들들을 모두 정리. Activity 재생성(회전 등) 마다 네이티브 메모리가 누수되는
+    // 걸 막아준다.
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching { generator.close() }
+            runCatching { segmenter.close() }
+        }
+    }
 
     var route by remember { mutableStateOf<AppRoute>(AppRoute.Home) }
 
