@@ -120,11 +120,11 @@ private enum class EditorTab(val label: String, val icon: ImageVector) {
     CROP("CROP", Icons.Outlined.Crop),
 }
 
-/** [selectedMaskId] sentinel for "show all masks composited" mode. */
-private const val PREVIEW_TARGET_ID = "__preview__"
-
 /** 멀티턴 vibe 대화에서 모델에 보낼 최대 turn 수. 토큰 폭주 방지용 상한. */
 private const val VIBE_HISTORY_MAX = 6
+
+/** Global 모드에서 슬라이더 멈춘 뒤 합성본 재계산까지 기다리는 시간 (ms). */
+private const val COMPOSITE_DEBOUNCE_MS = 300L
 
 /**
  * PhotoEditor 메인:
@@ -198,10 +198,27 @@ fun PhotoEditorScreen(
         }
     }
 
-    // Preview (모든 마스크 합성 결과) 상태. CPU 렌더라 비동기.
+    // Global 모드에서 보여줄 합성본. 마스크가 하나도 없으면 GL 만 쓰고, 마스크가
+    // 있을 때만 CPU `applyRecipeMasked` 로 모두 합쳐서 보여준다.
     var previewComposite by remember { mutableStateOf<Bitmap?>(null) }
     var previewing by remember { mutableStateOf(false) }
-    val isPreviewMode = selectedMaskId == PREVIEW_TARGET_ID
+    val isGlobalMode = selectedMaskId == null
+    val showComposite = isGlobalMode && masks.isNotEmpty()
+
+    // 슬라이더가 움직일 때마다 LaunchedEffect 가 재발화되도록, global + 모든 마스크의
+    // 파라미터를 합친 시그니처를 derivedStateOf 로 만든다. 값이 안 바뀌면 컴포지트
+    // 재계산 트리거도 안 됨.
+    val compositeKey by remember {
+        derivedStateOf {
+            buildList {
+                add(globalParams.snapshotKey())
+                for (m in masks) {
+                    add(m.id)
+                    add(m.params.snapshotKey())
+                }
+            }
+        }
+    }
 
     // Crop 적용된 프리뷰 + 마스크
     var croppedPreview by remember { mutableStateOf(previewBitmap) }
@@ -211,19 +228,22 @@ fun PhotoEditorScreen(
         // (LaunchedEffect 가 첫 composition 에서도 한 번 발화하지만, masks 와
         // detectedInstances 가 처음부터 emptyList 라 no-op.)
         masks = emptyList()
-        if (selectedMaskId != PREVIEW_TARGET_ID) selectedMaskId = null
+        selectedMaskId = null
         detectedInstances = emptyList()
         croppedPreview = withContext(Dispatchers.IO) { applyCropTransform(previewBitmap, crop) }
     }
 
-    LaunchedEffect(selectedMaskId, croppedPreview, masks) {
-        if (selectedMaskId != PREVIEW_TARGET_ID) {
+    LaunchedEffect(showComposite, croppedPreview, compositeKey) {
+        if (!showComposite) {
             previewComposite?.takeIf { !it.isRecycled }?.recycle()
             previewComposite = null
             previewing = false
             return@LaunchedEffect
         }
+        // 슬라이더가 빠르게 움직이는 동안에는 매번 재계산하지 말고, 멈춘 뒤 잠깐 기다림.
+        // key 가 바뀌면 LaunchedEffect 가 자동으로 cancel/restart 라서 자연스럽게 debounce.
         previewing = true
+        delay(COMPOSITE_DEBOUNCE_MS)
         val newComposite = withContext(Dispatchers.IO) {
             val scaledMasks = masks.map { m ->
                 val scaled = Bitmap.createScaledBitmap(
@@ -237,8 +257,6 @@ fun PhotoEditorScreen(
             try {
                 applyRecipeMasked(croppedPreview, globalParams, scaledMasks)
             } finally {
-                // 스케일된 알파는 더 이상 필요 없음. 원본 featheredAlphaBitmap (createScaled-
-                // Bitmap 이 동일 사이즈에 한해 같은 객체를 돌려줄 수 있음) 은 절대 회수 X.
                 for ((m, scaled) in scaledMasks) {
                     if (scaled !== m.featheredAlphaBitmap && !scaled.isRecycled) scaled.recycle()
                 }
@@ -324,25 +342,25 @@ fun PhotoEditorScreen(
                 .background(PhotoColors.Canvas),
             contentAlignment = Alignment.Center,
         ) {
-            if (isPreviewMode) {
-                // 꾹 누르고 있으면 원본으로 fade — before/after 비교용.
+            // Global 모드(마스크 선택 안 됨)에서는 꾹 누르면 원본 비교 가능. 한 곳에서
+            // 두 가지 렌더를 다룬다:
+            //   - 마스크 없음 → GL 라이브 (global only = 곧 합성본).
+            //   - 마스크 있음 → CPU 합성본 (debounced).
+            if (isGlobalMode) {
                 var showingOriginal by remember { mutableStateOf(false) }
                 val originalAlpha by animateFloatAsState(
                     targetValue = if (showingOriginal) 1f else 0f,
                     animationSpec = tween(durationMillis = 180),
-                    label = "preview-compare-fade",
+                    label = "global-compare-fade",
                 )
                 val haptic = LocalHapticFeedback.current
 
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(previewComposite) {
+                        .pointerInput(showComposite, previewComposite) {
                             detectTapGestures(
                                 onPress = {
-                                    // long-press 임계 안에서 손이 떼지면 long press 가
-                                    // 아닌 거고 (null 아닌 값 반환), 그 전에 timeout 이면
-                                    // 누른 채 머무는 상태 → 원본 토글.
                                     val released = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                                         tryAwaitRelease()
                                         true
@@ -357,11 +375,21 @@ fun PhotoEditorScreen(
                             )
                         },
                 ) {
-                    previewComposite?.let { composite ->
-                        Image(
-                            bitmap = composite.asImageBitmap(),
-                            contentDescription = "Composite preview",
-                            contentScale = ContentScale.Fit,
+                    if (showComposite) {
+                        previewComposite?.let { composite ->
+                            Image(
+                                bitmap = composite.asImageBitmap(),
+                                contentDescription = "Composite",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    } else {
+                        ImageGLView(
+                            bitmap = croppedPreview,
+                            global = globalParams,
+                            maskBitmap = null,
+                            mask = null,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -394,11 +422,15 @@ fun PhotoEditorScreen(
                         )
                     }
                 }
-                if (previewing) {
-                    CircularProgressIndicator(
-                        color = PhotoColors.PureWhite,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(28.dp),
+                if (showComposite && previewing) {
+                    // 미세한 합성 진행 인디케이터 — 우상단 작은 점.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp)
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF6BE3FF).copy(alpha = 0.85f)),
                     )
                 }
             } else {
@@ -415,7 +447,7 @@ fun PhotoEditorScreen(
             // Lightroom 식 "활성 마스크 포커스": 마스크 *바깥* (원본 영역) 을 어둡게 깔아서
             // 어느 부분이 편집 대상인지 한눈에 보이게 한다. 마스크 안쪽은 투명이라
             // 슬라이더로 바뀌는 결과가 그대로 노출됨.
-            (if (isPreviewMode) null else activeMask)?.let { m ->
+            activeMask?.let { m ->
                 var flashing by remember(m.id) { mutableStateOf(true) }
                 LaunchedEffect(m.id) {
                     flashing = true
@@ -491,21 +523,6 @@ fun PhotoEditorScreen(
                     if (selectedMaskId == id) selectedMaskId = null
                 },
             )
-            if (isPreviewMode) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(240.dp)
-                        .padding(horizontal = 24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "Composite preview · 모든 마스크가 합쳐진 결과입니다.\n꾹 누르면 원본과 비교할 수 있고, Global 이나 마스크 칩을 누르면 편집으로 돌아갑니다.",
-                        color = PhotoColors.CoolSilver,
-                        fontSize = 13.sp,
-                    )
-                }
-            } else {
             TabStrip(tab = tab, onTabChange = { tab = it })
             Spacer(Modifier.height(8.dp))
             when (tab) {
@@ -594,7 +611,6 @@ fun PhotoEditorScreen(
                 EditorTab.COLOR -> ColorControls(targetParams)
                 EditorTab.FILTERS -> FiltersRow(targetParams)
                 EditorTab.CROP -> CropControls(crop, onChange = { crop = it })
-            }
             }
         }
     }
@@ -745,12 +761,6 @@ private fun MaskSelectorRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TargetChip(
-            label = "Preview",
-            selected = selectedId == PREVIEW_TARGET_ID,
-            accent = Color(0xFF6BE3FF),
-            onClick = { onSelect(PREVIEW_TARGET_ID) },
-        )
         TargetChip(label = "Global", selected = selectedId == null, onClick = { onSelect(null) })
         for (m in masks) {
             TargetChip(label = m.label, selected = selectedId == m.id, onClick = { onSelect(m.id) }) {

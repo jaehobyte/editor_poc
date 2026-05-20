@@ -45,6 +45,17 @@ class EditorParams {
         colorTuningEnabled = src.colorTuningEnabled
     }
 
+    /**
+     * 동등 비교용 스냅샷 키. 9개 톤/스위치 + colorTuning 의 contentHashCode 를 묶은
+     * 리스트로, derivedStateOf 안에서 LaunchedEffect 키로 쓰기 좋게 만든 헬퍼.
+     * 어느 한 필드라도 바뀌면 리스트가 달라져서 effect 가 재발화한다.
+     */
+    fun snapshotKey(): Any = listOf(
+        temperature, contrast, tint, saturation,
+        brightness, exposure, highlights, shadows,
+        colorTuningEnabled, colorTuning.contentHashCode(),
+    )
+
     fun applyInferred(model29: FloatArray, toneFactor: Float = 1f, colorFactor: Float = 1f) {
         require(model29.size == 29) { "model output must be 29 floats" }
         temperature = model29[0] * 100f * toneFactor
