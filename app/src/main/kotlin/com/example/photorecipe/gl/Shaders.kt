@@ -222,7 +222,7 @@ void main() {
 
     vec3 finalRgb = globalResult;
     if (u_hasMask) {
-        float a = texture(u_mask, v_uv).r;
+        float a = texture(u_mask, v_uv).a;
         if (a > 0.001) {
             vec3 maskResult = applyAll(
                 rgb, u_wb1, u_contrast1, u_tint1, u_saturation1,

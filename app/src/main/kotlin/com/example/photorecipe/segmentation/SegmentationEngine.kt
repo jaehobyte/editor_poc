@@ -57,19 +57,20 @@ class SegmentationEngine private constructor(
         val pixels = IntArray(w * h)
         // confidenceMasks 는 float32 한 채널, categoryMask 는 uint8 한 채널.
         // MediaPipe Tasks 의 ByteBuffer 는 형식이 다르므로 capacity 로 분기.
+        // mask intensity 를 알파 채널에 저장하고 RGB 는 흰색. 이렇게 두면:
+        //  - GL 셰이더: texture(u_mask, v_uv).a 로 마스크 알파 읽기
+        //  - Compose Image: ColorFilter.tint(color) 만 걸어주면 그 색이 마스크 영역에만 그려짐
         val capacity = buf.capacity()
         if (capacity == w * h * 4) {
-            // float32 confidence in [0, 1]
             val f = buf.asFloatBuffer()
             for (i in 0 until w * h) {
                 val a = (f.get(i).coerceIn(0f, 1f) * 255f).toInt()
-                pixels[i] = AndroidColor.argb(255, a, a, a)
+                pixels[i] = AndroidColor.argb(a, 255, 255, 255)
             }
         } else {
-            // uint8 category mask
             for (i in 0 until w * h) {
                 val a = buf.get(i).toInt() and 0xFF
-                pixels[i] = AndroidColor.argb(255, a, a, a)
+                pixels[i] = AndroidColor.argb(a, 255, 255, 255)
             }
         }
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)

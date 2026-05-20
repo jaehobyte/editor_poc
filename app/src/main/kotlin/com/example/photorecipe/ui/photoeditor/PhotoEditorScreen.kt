@@ -45,6 +45,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -55,10 +58,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -194,9 +202,17 @@ fun PhotoEditorScreen(
                                 segmenting = false
                                 r.fold(
                                     onSuccess = { alpha ->
+                                        // 새 마스크의 파라미터는 현재 global 값 복사로 시작 — 사용자가
+                                        // 슬라이더로 마스크 파라미터를 바꾸자마자 해당 영역에 변화가 보이도록.
+                                        // (모두 0 으로 시작하면 global 효과까지 사라져서 슬라이더가 동작하지
+                                        // 않는 것처럼 보임.)
+                                        val maskParams = EditorParams().apply {
+                                            copyValuesFrom(globalParams)
+                                        }
                                         val newMask = Mask(
                                             id = "mask-${System.currentTimeMillis()}",
                                             alphaBitmap = alpha,
+                                            params = maskParams,
                                             label = "Mask ${masks.size + 1}",
                                         )
                                         masks = masks + newMask
@@ -217,6 +233,32 @@ fun PhotoEditorScreen(
                 mask = activeMask?.params,
                 modifier = Modifier.fillMaxSize(),
             )
+
+            // 선택된 마스크의 영역을 색 오버레이로 표시. 생성 직후엔 살짝 더 진하게
+            // (flash), 잠시 후 옅어져서 보정 결과를 가리지 않도록.
+            activeMask?.let { m ->
+                var flashing by remember(m.id) { mutableStateOf(true) }
+                LaunchedEffect(m.id) {
+                    flashing = true
+                    delay(700)
+                    flashing = false
+                }
+                val overlayAlpha by animateFloatAsState(
+                    targetValue = if (flashing) 0.55f else 0.22f,
+                    animationSpec = tween(durationMillis = 700),
+                    label = "mask-overlay-alpha",
+                )
+                Image(
+                    bitmap = m.alphaBitmap.asImageBitmap(),
+                    contentDescription = "Selected mask region",
+                    contentScale = ContentScale.Fit,
+                    colorFilter = ColorFilter.tint(Color(0xFFFF8A3D), BlendMode.SrcIn),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(overlayAlpha),
+                )
+            }
+
             if (segmenting) {
                 Box(
                     modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)),

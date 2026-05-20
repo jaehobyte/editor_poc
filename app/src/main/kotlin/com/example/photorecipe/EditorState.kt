@@ -31,6 +31,20 @@ class EditorParams {
         colorTuningEnabled = false
     }
 
+    /** 현재 값들을 복사한 새 EditorParams. 마스크가 global 기준으로 시작하도록 할 때 사용. */
+    fun copyValuesFrom(src: EditorParams) {
+        temperature = src.temperature
+        contrast = src.contrast
+        tint = src.tint
+        saturation = src.saturation
+        brightness = src.brightness
+        exposure = src.exposure
+        highlights = src.highlights
+        shadows = src.shadows
+        colorTuning = src.colorTuning.copyOf()
+        colorTuningEnabled = src.colorTuningEnabled
+    }
+
     fun applyInferred(model29: FloatArray, toneFactor: Float = 1f, colorFactor: Float = 1f) {
         require(model29.size == 29) { "model output must be 29 floats" }
         temperature = model29[0] * 100f * toneFactor
