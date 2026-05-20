@@ -149,17 +149,25 @@ fun PhotoEditorScreen(
     // Crop 적용된 프리뷰 + 마스크
     var croppedPreview by remember { mutableStateOf(previewBitmap) }
     LaunchedEffect(previewBitmap, crop) {
+        // 크롭이 바뀌면 기존 마스크 알파는 pre-crop 좌표계라 더 이상 유효하지 않다.
+        // 검출도 새 croppedPreview 에 다시 돌아갈 거니까 stale 인스턴스 칩도 제거.
+        // (LaunchedEffect 가 첫 composition 에서도 한 번 발화하지만, masks 와
+        // detectedInstances 가 처음부터 emptyList 라 no-op.)
+        masks = emptyList()
+        if (selectedMaskId != PREVIEW_TARGET_ID) selectedMaskId = null
+        detectedInstances = emptyList()
         croppedPreview = withContext(Dispatchers.IO) { applyCropTransform(previewBitmap, crop) }
     }
 
     LaunchedEffect(selectedMaskId, croppedPreview, masks) {
         if (selectedMaskId != PREVIEW_TARGET_ID) {
+            previewComposite?.takeIf { !it.isRecycled }?.recycle()
             previewComposite = null
             previewing = false
             return@LaunchedEffect
         }
         previewing = true
-        previewComposite = withContext(Dispatchers.IO) {
+        val newComposite = withContext(Dispatchers.IO) {
             val scaledMasks = masks.map { m ->
                 val scaled = Bitmap.createScaledBitmap(
                     m.featheredAlphaBitmap,
@@ -169,14 +177,26 @@ fun PhotoEditorScreen(
                 )
                 m to scaled
             }
-            applyRecipeMasked(croppedPreview, globalParams, scaledMasks)
+            try {
+                applyRecipeMasked(croppedPreview, globalParams, scaledMasks)
+            } finally {
+                // 스케일된 알파는 더 이상 필요 없음. 원본 featheredAlphaBitmap (createScaled-
+                // Bitmap 이 동일 사이즈에 한해 같은 객체를 돌려줄 수 있음) 은 절대 회수 X.
+                for ((m, scaled) in scaledMasks) {
+                    if (scaled !== m.featheredAlphaBitmap && !scaled.isRecycled) scaled.recycle()
+                }
+            }
         }
+        previewComposite?.takeIf { it !== newComposite && !it.isRecycled }?.recycle()
+        previewComposite = newComposite
         previewing = false
     }
 
     // 이미지가 들어오거나 crop 이 바뀔 때마다 인스턴스 자동 검출.
     LaunchedEffect(croppedPreview) {
         detecting = true
+        // 크롭 effect 에서 이미 비웠지만, croppedPreview 만 바뀌는 시나리오 대비 안전망.
+        detectedInstances = emptyList()
         detectedInstances = withContext(Dispatchers.IO) {
             runCatching { segmenter.detectInstances(croppedPreview) }.getOrElse { emptyList() }
         }
@@ -1003,7 +1023,7 @@ private suspend fun applyVibePrompt(
     }
 
     // ── 2. Gemini 호출 ────────────────────────────────────────────
-    val edits = runCatching {
+    val response = runCatching {
         vibeClient.proposeEdits(prompt, targets, currentValues)
     }.getOrElse { e ->
         return VibeApplyResult(
@@ -1012,11 +1032,15 @@ private suspend fun applyVibePrompt(
             status = "Gemini error: ${e.message?.take(120)}",
         )
     }
+    val edits = response.edits
     if (edits.isEmpty()) {
+        // Tool call 이 없으면 모델이 텍스트로 답한 경우가 많음 (거부 / 추가 질문).
+        // 그 텍스트를 그대로 보여줘서 왜 안됐는지 알 수 있게.
+        val refusal = response.message?.take(220)
         return VibeApplyResult(
             newMasks = masks,
             newSelectedId = null,
-            status = "No edits proposed for: \"$prompt\"",
+            status = refusal?.let { "Gemini: $it" } ?: "No edits proposed for: \"$prompt\"",
         )
     }
 

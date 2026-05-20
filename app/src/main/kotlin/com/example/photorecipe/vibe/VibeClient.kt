@@ -36,6 +36,16 @@ data class VibeEdit(
     val colorTuning: Map<String, Map<String, Float>> = emptyMap(),
 )
 
+/**
+ * Gemini 응답 한 번분. 보통 [edits] 에 한두 개의 함수 호출이 채워지지만, 모델이
+ * tool call 대신 텍스트로 답하면 (거부 / 추가 질문 / 모호) [message] 에 그 텍스트가
+ * 들어온다. 호출 측은 둘 다 처리해야 함.
+ */
+data class VibeResponse(
+    val edits: List<VibeEdit>,
+    val message: String? = null,
+)
+
 class VibeClient(private val apiKey: String) {
 
     private val http = OkHttpClient.Builder()
@@ -48,7 +58,7 @@ class VibeClient(private val apiKey: String) {
         userPrompt: String,
         availableTargets: List<String>,
         currentValues: Map<String, EditorParams>,
-    ): List<VibeEdit> = withContext(Dispatchers.IO) {
+    ): VibeResponse = withContext(Dispatchers.IO) {
         check(apiKey.isNotBlank()) { "GEMINI_KEY is missing — populate .env and rebuild" }
         require(userPrompt.isNotBlank()) { "prompt must not be blank" }
         require(availableTargets.isNotEmpty()) { "must offer at least one target (e.g. 'global')" }
@@ -64,7 +74,7 @@ class VibeClient(private val apiKey: String) {
             if (!resp.isSuccessful) {
                 error("Vibe API error ${resp.code}: ${text.take(500)}")
             }
-            parseEdits(text)
+            parseResponse(text)
         }
     }
 
@@ -287,10 +297,11 @@ class VibeClient(private val apiKey: String) {
         .put("type", "number")
         .put("description", "$desc Range [-100, 100], identity = 0.")
 
-    private fun parseEdits(json: String): List<VibeEdit> {
-        val out = ArrayList<VibeEdit>()
+    private fun parseResponse(json: String): VibeResponse {
+        val edits = ArrayList<VibeEdit>()
+        val textParts = ArrayList<String>()
         val root = JSONObject(json)
-        val candidates = root.optJSONArray("candidates") ?: return emptyList()
+        val candidates = root.optJSONArray("candidates") ?: return VibeResponse(emptyList())
         for (i in 0 until candidates.length()) {
             val parts = candidates.getJSONObject(i)
                 .optJSONObject("content")
@@ -299,30 +310,40 @@ class VibeClient(private val apiKey: String) {
                 val part = parts.getJSONObject(j)
                 val fc = part.optJSONObject("functionCall")
                     ?: part.optJSONObject("function_call")
-                    ?: continue
-                if (fc.optString("name") != TOOL_NAME) continue
-                val args = fc.optJSONObject("args") ?: continue
-                val target = args.optString("target").takeIf { it.isNotBlank() } ?: continue
-
-                val toneChanges = LinkedHashMap<String, Float>()
-                for (key in TONE_KEYS) {
-                    if (!args.has(key) || args.isNull(key)) continue
-                    val v = args.optDouble(key, Double.NaN)
-                    if (!v.isNaN()) toneChanges[key] = v.toFloat().coerceIn(-100f, 100f)
+                if (fc != null) {
+                    parseEditFromCall(fc)?.let { edits += it }
+                    continue
                 }
-
-                val colorTuning = parseColorTuning(args.optJSONObject("color_tuning"))
-
-                if (toneChanges.isNotEmpty() || colorTuning.isNotEmpty()) {
-                    out += VibeEdit(
-                        target = target.lowercase(),
-                        changes = toneChanges,
-                        colorTuning = colorTuning,
-                    )
-                }
+                val text = part.optString("text").takeIf { it.isNotBlank() }
+                if (text != null) textParts += text
             }
         }
-        return out
+        return VibeResponse(
+            edits = edits,
+            message = textParts.takeIf { it.isNotEmpty() }?.joinToString("\n")?.trim(),
+        )
+    }
+
+    private fun parseEditFromCall(fc: JSONObject): VibeEdit? {
+        if (fc.optString("name") != TOOL_NAME) return null
+        val args = fc.optJSONObject("args") ?: return null
+        val target = args.optString("target").takeIf { it.isNotBlank() } ?: return null
+
+        val toneChanges = LinkedHashMap<String, Float>()
+        for (key in TONE_KEYS) {
+            if (!args.has(key) || args.isNull(key)) continue
+            val v = args.optDouble(key, Double.NaN)
+            if (!v.isNaN()) toneChanges[key] = v.toFloat().coerceIn(-100f, 100f)
+        }
+
+        val colorTuning = parseColorTuning(args.optJSONObject("color_tuning"))
+
+        if (toneChanges.isEmpty() && colorTuning.isEmpty()) return null
+        return VibeEdit(
+            target = target.lowercase(),
+            changes = toneChanges,
+            colorTuning = colorTuning,
+        )
     }
 
     private fun parseColorTuning(node: JSONObject?): Map<String, Map<String, Float>> {

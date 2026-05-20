@@ -39,7 +39,10 @@ class SegmentationEngine private constructor(
      * Detect objects in [bitmap] and return per-instance masks.
      * Runs ObjectDetector once and ImageSegmenter once, then composes the two,
      * 그리고 SegFormer 풍경 마스크도 함께 합쳐 한 리스트로 반환.
+     *
+     * `@Synchronized` — MediaPipe task runner 들은 thread-safe 가 아니다.
      */
+    @Synchronized
     fun detectInstances(bitmap: Bitmap, maxResults: Int = 8): List<DetectedInstance> {
         val objects = detectObjects(bitmap, maxResults)
         val scenery = try {

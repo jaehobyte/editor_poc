@@ -35,7 +35,14 @@ class SegFormerSceneryEngine private constructor(
     private val outputBuf: ByteBuffer =
         ByteBuffer.allocateDirect(OUT_SIZE * OUT_SIZE * NUM_CLASSES * 4).order(ByteOrder.nativeOrder())
 
-    /** 풍경 클래스 마스크들. 영역 큰 순서로 정렬되어 반환. */
+    /**
+     * 풍경 클래스 마스크들. 영역 큰 순서로 정렬되어 반환.
+     *
+     * `@Synchronized` — 인스턴스 안에 [inputBuf] / [outputBuf] / [interpreter] 가
+     * 공유 mutable state 라서 동시 호출이 들어오면 결과가 조용히 깨진다. 외부에서
+     * 보장해야 할 invariant 를 클래스 안쪽으로 끌고 와서 안전한 기본값으로.
+     */
+    @Synchronized
     fun detectScenery(
         bitmap: Bitmap,
         minAreaFrac: Float = 0.04f,
@@ -51,6 +58,7 @@ class SegFormerSceneryEngine private constructor(
         val padTop = (IN_SIZE - contentH) / 2
         val resized = Bitmap.createScaledBitmap(bitmap, contentW, contentH, true)
         fillInputBufferLetterboxed(resized, padLeft, padTop, contentW, contentH)
+        if (resized !== bitmap) resized.recycle() // 입력은 픽셀 복사 끝났으니 즉시 정리.
 
         // ── 2) Inference + argmax ───────────────────────────────────────
         outputBuf.rewind()

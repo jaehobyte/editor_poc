@@ -111,6 +111,7 @@ private fun computeFeathered(maskBitmap: Bitmap): Bitmap {
 
     val srcPx = IntArray(workW * workH)
     work.getPixels(srcPx, 0, workW, 0, 0, workW, workH)
+    if (work !== maskBitmap) work.recycle() // 스케일 임시 비트맵은 더 이상 필요 없음.
     val srcA = FloatArray(workW * workH) { i -> ((srcPx[i] ushr 24) and 0xFF).toFloat() }
 
     // 마스크 짧은 변의 약 1.5% 를 sigma 로. 너무 작으면 안 보이고, 너무 크면 느려진다.
@@ -154,7 +155,13 @@ private fun computeFeathered(maskBitmap: Bitmap): Bitmap {
     val blurred = Bitmap.createBitmap(workW, workH, Bitmap.Config.ARGB_8888)
     blurred.setPixels(outPx, 0, workW, 0, 0, workW, workH)
 
-    return if (workScale < 1f) Bitmap.createScaledBitmap(blurred, origW, origH, true) else blurred
+    return if (workScale < 1f) {
+        val upscaled = Bitmap.createScaledBitmap(blurred, origW, origH, true)
+        if (upscaled !== blurred) blurred.recycle()
+        upscaled
+    } else {
+        blurred
+    }
 }
 
 private const val BLUR_WORK_MAX_SIDE = 1024
