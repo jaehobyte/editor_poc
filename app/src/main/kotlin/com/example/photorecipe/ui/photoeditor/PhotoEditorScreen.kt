@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.Download
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.outlined.FlipCameraAndroid
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Photo
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Send
@@ -81,14 +83,21 @@ import com.example.photorecipe.EditorParams
 import com.example.photorecipe.editor.applyRecipeMasked
 import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.segmentation.SegmentationEngine.DetectedInstance
+import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.ImageGLView
 import com.example.photorecipe.ui.theme.PhotoColors
 import com.example.photorecipe.util.decodeBitmapForExport
+import com.example.photorecipe.util.decodeBitmapWithOrientation
 import com.example.photorecipe.util.saveBitmapToGallery
 import com.example.photorecipe.vibe.VibeClient
 import com.example.photorecipe.vibe.VibeEdit
 import com.example.photorecipe.vibe.VibeTurn
 import com.example.photorecipe.vibe.rememberSpeechSession
+
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -104,6 +113,7 @@ import androidx.core.content.ContextCompat
 
 private enum class EditorTab(val label: String, val icon: ImageVector) {
     VIBE("VIBE", Icons.Outlined.AutoAwesome),
+    RECIPE("RECIPE", Icons.Outlined.AutoFixHigh),
     ADJUST("ADJUST", Icons.Outlined.Tune),
     COLOR("COLOR", Icons.Outlined.Palette),
     FILTERS("FILTERS", Icons.Outlined.Photo),
@@ -129,6 +139,7 @@ fun PhotoEditorScreen(
     previewBitmap: Bitmap,
     segmenter: SegmentationEngine,
     vibeClient: VibeClient,
+    generator: RecipeGenerator,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -152,6 +163,40 @@ fun PhotoEditorScreen(
     var vibeStatus by remember { mutableStateOf<String?>(null) }
     // 멀티턴 대화 히스토리. "조금 더" / "취소" 같은 후속 명령용.
     var vibeHistory by remember { mutableStateOf<List<VibeTurn>>(emptyList()) }
+    // Vibe 입력 옆 갤러리 버튼으로 첨부한 reference 사진 (Gemini 가 recipe transfer
+    // 함수를 호출할지 판단하는 입력).
+    var vibeAttachment by remember { mutableStateOf<Bitmap?>(null) }
+
+    // Recipe 탭 — 직접 reference 를 골라 recipe_generator.tflite 로 톤 추론 → 현재
+    // 선택된 target params 에 바로 적용. LLM 우회 경로.
+    var recipeReference by remember { mutableStateOf<Bitmap?>(null) }
+    var recipeBusy by remember { mutableStateOf(false) }
+    var recipeStatus by remember { mutableStateOf<String?>(null) }
+
+    // Photo picker 두 개 — Vibe 첨부용, Recipe 탭 reference 용. URI → IO 에서 decode.
+    val vibeAttachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                runCatching { decodeBitmapWithOrientation(context, uri) }.getOrNull()
+            }
+            vibeAttachment = bmp
+        }
+    }
+    val recipeReferencePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                runCatching { decodeBitmapWithOrientation(context, uri) }.getOrNull()
+            }
+            recipeReference = bmp
+            recipeStatus = null
+        }
+    }
 
     // Preview (모든 마스크 합성 결과) 상태. CPU 렌더라 비동기.
     var previewComposite by remember { mutableStateOf<Bitmap?>(null) }
@@ -238,6 +283,9 @@ fun PhotoEditorScreen(
                 crop = CropTransform()
                 vibeHistory = emptyList()
                 vibeStatus = null
+                vibeAttachment = null
+                recipeReference = null
+                recipeStatus = null
             },
             onSave = {
                 if (saving) return@TopBar
@@ -466,6 +514,13 @@ fun PhotoEditorScreen(
                     onPromptChange = { vibePrompt = it },
                     busy = vibeBusy,
                     status = vibeStatus,
+                    attachment = vibeAttachment,
+                    onPickAttachment = {
+                        vibeAttachmentPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                    onClearAttachment = { vibeAttachment = null },
                     onSubmit = {
                         val text = vibePrompt.trim()
                         if (text.isBlank() || vibeBusy) return@VibeControls
@@ -474,8 +529,11 @@ fun PhotoEditorScreen(
                         scope.launch {
                             val result = applyVibePrompt(
                                 vibeClient = vibeClient,
+                                generator = generator,
                                 prompt = text,
                                 history = vibeHistory,
+                                referenceImage = vibeAttachment,
+                                content = croppedPreview,
                                 detectedInstances = detectedInstances,
                                 masks = masks,
                                 globalParams = globalParams,
@@ -491,6 +549,44 @@ fun PhotoEditorScreen(
                             )).takeLast(VIBE_HISTORY_MAX)
                             vibePrompt = ""
                             vibeBusy = false
+                        }
+                    },
+                )
+                EditorTab.RECIPE -> RecipeControls(
+                    reference = recipeReference,
+                    busy = recipeBusy,
+                    status = recipeStatus,
+                    targetLabel = activeMask?.label ?: "Global",
+                    onPickReference = {
+                        recipeReferencePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                    onClearReference = {
+                        recipeReference = null
+                        recipeStatus = null
+                    },
+                    onApply = {
+                        val ref = recipeReference ?: return@RecipeControls
+                        if (recipeBusy) return@RecipeControls
+                        recipeBusy = true
+                        recipeStatus = null
+                        scope.launch {
+                            val r = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    generator.infer(content = croppedPreview, reference = ref)
+                                }
+                            }
+                            r.fold(
+                                onSuccess = { params29 ->
+                                    targetParams.applyInferred(params29)
+                                    recipeStatus = "Applied recipe to ${activeMask?.label ?: "Global"}"
+                                },
+                                onFailure = { e ->
+                                    recipeStatus = "Failed: ${e.message?.take(120)}"
+                                },
+                            )
+                            recipeBusy = false
                         }
                     },
                 )
@@ -977,6 +1073,9 @@ private fun VibeControls(
     onPromptChange: (String) -> Unit,
     busy: Boolean,
     status: String?,
+    attachment: Bitmap?,
+    onPickAttachment: () -> Unit,
+    onClearAttachment: () -> Unit,
     onSubmit: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -1088,6 +1187,17 @@ private fun VibeControls(
                     modifier = Modifier.size(22.dp),
                 )
             }
+            // Gallery 첨부 — 참조 사진을 붙여 "이 사진처럼" 같은 발화에 쓴다.
+            IconButton(
+                onClick = onPickAttachment,
+                enabled = !busy && !session.recording,
+            ) {
+                Icon(
+                    Icons.Outlined.PhotoLibrary,
+                    contentDescription = "Attach reference photo",
+                    tint = if (attachment != null) Color(0xFF6BE3FF) else PhotoColors.PureWhite,
+                )
+            }
             IconButton(onClick = onSubmit, enabled = !busy && prompt.isNotBlank()) {
                 if (busy) {
                     CircularProgressIndicator(
@@ -1097,6 +1207,42 @@ private fun VibeControls(
                     )
                 } else {
                     Icon(Icons.Outlined.Send, "Send", tint = PhotoColors.PureWhite)
+                }
+            }
+        }
+        // 첨부된 reference 가 있으면 작은 썸네일 + 제거 X 버튼.
+        if (attachment != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(top = 2.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, Color(0xFF6BE3FF).copy(alpha = 0.6f), RoundedCornerShape(8.dp)),
+                ) {
+                    Image(
+                        bitmap = attachment.asImageBitmap(),
+                        contentDescription = "Attached reference",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                Text(
+                    text = "Reference attached · 이 사진처럼 / 이 느낌으로 라고 말해보세요",
+                    color = PhotoColors.CoolSilver,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onClearAttachment, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = "Remove reference",
+                        tint = PhotoColors.MidSlate,
+                        modifier = Modifier.size(16.dp),
+                    )
                 }
             }
         }
@@ -1129,6 +1275,117 @@ private fun VibeControls(
     }
 }
 
+// ─── Recipe (TFLite 직접 추론) ────────────────────────────────────
+
+@Composable
+private fun RecipeControls(
+    reference: Bitmap?,
+    busy: Boolean,
+    status: String?,
+    targetLabel: String,
+    onPickReference: () -> Unit,
+    onClearReference: () -> Unit,
+    onApply: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(240.dp)
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = "RECIPE — transfer a reference look",
+            color = PhotoColors.CoolSilver,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(PhotoColors.DarkSurface)
+                    .border(1.dp, PhotoColors.BorderDark, RoundedCornerShape(10.dp))
+                    .clickable(onClick = onPickReference),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (reference != null) {
+                    Image(
+                        bitmap = reference.asImageBitmap(),
+                        contentDescription = "Reference photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Icon(
+                        Icons.Outlined.PhotoLibrary,
+                        contentDescription = "Pick reference",
+                        tint = PhotoColors.MidSlate,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = if (reference != null) {
+                        "Reference 색감을 분석해서 $targetLabel 에 적용합니다."
+                    } else {
+                        "갤러리에서 참조 사진을 골라주세요. 톤·색조가 $targetLabel 로 옮겨집니다."
+                    },
+                    color = if (reference != null) PhotoColors.PureWhite else PhotoColors.CoolSilver,
+                    fontSize = 12.sp,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = onApply,
+                        enabled = !busy && reference != null,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PhotoColors.PureWhite,
+                            contentColor = PhotoColors.RunwayBlack,
+                            disabledContainerColor = PhotoColors.DarkSurface,
+                            disabledContentColor = PhotoColors.MidSlate,
+                        ),
+                        shape = RoundedCornerShape(50),
+                    ) {
+                        if (busy) {
+                            CircularProgressIndicator(
+                                color = PhotoColors.RunwayBlack,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        } else {
+                            Text("Apply", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    if (reference != null && !busy) {
+                        TextButton(onClick = onClearReference) {
+                            Text(
+                                "Clear",
+                                color = PhotoColors.MidSlate,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (status != null) {
+            Text(
+                text = status,
+                color = PhotoColors.CoolSilver,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
 /** Vibe prompt 한 번 처리 결과. */
 private data class VibeApplyResult(
     val newMasks: List<Mask>,
@@ -1152,8 +1409,11 @@ private data class VibeApplyResult(
  */
 private suspend fun applyVibePrompt(
     vibeClient: VibeClient,
+    generator: RecipeGenerator,
     prompt: String,
     history: List<VibeTurn>,
+    referenceImage: Bitmap?,
+    content: Bitmap,
     detectedInstances: List<DetectedInstance>,
     masks: List<Mask>,
     globalParams: EditorParams,
@@ -1171,7 +1431,7 @@ private suspend fun applyVibePrompt(
 
     // ── 2. Gemini 호출 ────────────────────────────────────────────
     val response = runCatching {
-        vibeClient.proposeEdits(prompt, targets, currentValues, history)
+        vibeClient.proposeEdits(prompt, targets, currentValues, history, referenceImage)
     }.getOrElse { e ->
         val msg = "Gemini error: ${e.message?.take(120)}"
         return VibeApplyResult(
@@ -1233,6 +1493,41 @@ private suspend fun applyVibePrompt(
             }
         }
         if (params == null) continue
+
+        val recipe = edit.recipeTransfer
+        if (recipe != null) {
+            if (referenceImage == null) {
+                skipped++
+                continue
+            }
+            val inferResult = runCatching {
+                withContext(Dispatchers.IO) {
+                    generator.infer(content = content, reference = referenceImage)
+                }
+            }
+            val params29 = inferResult.getOrNull()
+            if (params29 == null) {
+                if (appliedSummary.isNotEmpty()) appliedSummary.append(" · ")
+                appliedSummary.append(
+                    "$target: recipe failed (${inferResult.exceptionOrNull()?.message?.take(60)})",
+                )
+                continue
+            }
+            params.applyInferred(
+                model29 = params29,
+                toneFactor = recipe.toneFactor,
+                colorFactor = recipe.colorFactor,
+            )
+
+            if (target != "global" && firstAffectedId == null) {
+                firstAffectedId = mutableMasks.firstOrNull { it.label.equals(target, ignoreCase = true) }?.id
+            }
+
+            if (appliedSummary.isNotEmpty()) appliedSummary.append(" · ")
+            appliedSummary.append("$target: recipe transfer (tone=${recipe.toneFactor}, color=${recipe.colorFactor})")
+            continue
+        }
+
         applyChanges(params, edit.changes)
         applyColorTuning(params, edit.colorTuning)
 

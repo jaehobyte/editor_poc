@@ -1,5 +1,7 @@
 package com.example.photorecipe.vibe
 
+import android.graphics.Bitmap
+import android.util.Base64
 import com.example.photorecipe.EditorParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -9,6 +11,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -34,6 +37,21 @@ data class VibeEdit(
      *   → channel ("hue"/"saturation"/"luminance") → 절대값 [-100, 100].
      */
     val colorTuning: Map<String, Map<String, Float>> = emptyMap(),
+    /**
+     * 사용자가 reference 사진을 첨부하고 "이 사진처럼" 류로 요청했을 때, 모델이
+     * 직접 슬라이더 값을 정하는 대신 recipe_generator.tflite 를 돌리도록 위임한
+     * 호출. 호출 측이 (content, reference) 로 추론 → [EditorParams.applyInferred]
+     * 로 [target] 에 적용해야 한다. null 이면 일반 [changes] / [colorTuning] 경로.
+     */
+    val recipeTransfer: RecipeTransferRequest? = null,
+)
+
+/** apply_recipe_from_reference 의 인자 — 적용 강도 스케일. */
+data class RecipeTransferRequest(
+    /** 톤(8축) 강도. 1.0 = 모델 출력 그대로. */
+    val toneFactor: Float = 1.0f,
+    /** Color tuning(21개) 강도. 1.0 = 모델 출력 그대로. */
+    val colorFactor: Float = 1.0f,
 )
 
 /**
@@ -76,12 +94,14 @@ class VibeClient(private val apiKey: String) {
         availableTargets: List<String>,
         currentValues: Map<String, EditorParams>,
         history: List<VibeTurn> = emptyList(),
+        referenceImage: Bitmap? = null,
     ): VibeResponse = withContext(Dispatchers.IO) {
         check(apiKey.isNotBlank()) { "GEMINI_KEY is missing — populate .env and rebuild" }
         require(userPrompt.isNotBlank()) { "prompt must not be blank" }
         require(availableTargets.isNotEmpty()) { "must offer at least one target (e.g. 'global')" }
 
-        val body = buildRequestBody(userPrompt, availableTargets, currentValues, history)
+        val referenceB64 = referenceImage?.let { bitmapToJpegBase64(it) }
+        val body = buildRequestBody(userPrompt, availableTargets, currentValues, history, referenceB64)
         val req = Request.Builder()
             .url("$ENDPOINT?key=$apiKey")
             .post(body.toRequestBody(JSON))
@@ -96,14 +116,35 @@ class VibeClient(private val apiKey: String) {
         }
     }
 
+    private fun bitmapToJpegBase64(bmp: Bitmap, quality: Int = 85, maxDim: Int = 768): String {
+        val long = maxOf(bmp.width, bmp.height)
+        val downscaled = if (long <= maxDim) bmp else {
+            val scale = maxDim.toFloat() / long
+            Bitmap.createScaledBitmap(
+                bmp,
+                (bmp.width * scale).toInt().coerceAtLeast(1),
+                (bmp.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        }
+        val out = ByteArrayOutputStream()
+        downscaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        if (downscaled !== bmp) downscaled.recycle()
+        return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    }
+
     private fun buildRequestBody(
         userPrompt: String,
         targets: List<String>,
         state: Map<String, EditorParams>,
         history: List<VibeTurn>,
+        referenceB64: String?,
     ): String {
         val systemInstruction = JSONObject().put(
-            "parts", JSONArray().put(JSONObject().put("text", buildSystemPrompt(targets, state))),
+            "parts",
+            JSONArray().put(
+                JSONObject().put("text", buildSystemPrompt(targets, state, referenceB64 != null)),
+            ),
         )
         // 최근 turn 들을 user/model 텍스트 페어로 풀어서 contents 에 펼침.
         // 마지막에 새 user 메시지를 붙임. 모델은 이 흐름을 보고 "조금 더" / "취소"
@@ -121,19 +162,31 @@ class VibeClient(private val apiKey: String) {
                     .put("parts", JSONArray().put(JSONObject().put("text", turn.summary))),
             )
         }
-        contents.put(
-            JSONObject()
-                .put("role", "user")
-                .put("parts", JSONArray().put(JSONObject().put("text", userPrompt))),
-        )
-        val tools = JSONArray().put(
-            JSONObject().put("function_declarations", JSONArray().put(toolSchema(targets))),
-        )
+        // 마지막 user 메시지에 reference 이미지(있으면)와 새 prompt 텍스트를 같이 넣는다.
+        val finalParts = JSONArray()
+        if (referenceB64 != null) {
+            finalParts.put(
+                JSONObject().put(
+                    "inline_data",
+                    JSONObject()
+                        .put("mime_type", "image/jpeg")
+                        .put("data", referenceB64),
+                ),
+            )
+        }
+        finalParts.put(JSONObject().put("text", userPrompt))
+        contents.put(JSONObject().put("role", "user").put("parts", finalParts))
+
+        val allowed = JSONArray().put(TOOL_NAME_EDIT)
+        if (referenceB64 != null) allowed.put(TOOL_NAME_RECIPE)
+        val declarations = JSONArray().put(toolSchemaEdit(targets))
+        if (referenceB64 != null) declarations.put(toolSchemaRecipe(targets))
+        val tools = JSONArray().put(JSONObject().put("function_declarations", declarations))
         val toolConfig = JSONObject().put(
             "function_calling_config",
             JSONObject()
                 .put("mode", "ANY")
-                .put("allowed_function_names", JSONArray().put(TOOL_NAME)),
+                .put("allowed_function_names", allowed),
         )
         return JSONObject()
             .put("system_instruction", systemInstruction)
@@ -143,7 +196,11 @@ class VibeClient(private val apiKey: String) {
             .toString()
     }
 
-    private fun buildSystemPrompt(targets: List<String>, state: Map<String, EditorParams>): String = buildString {
+    private fun buildSystemPrompt(
+        targets: List<String>,
+        state: Map<String, EditorParams>,
+        hasReferenceImage: Boolean,
+    ): String = buildString {
         appendLine("You are a Lightroom-style photo editor assistant. The user types or speaks an edit")
         appendLine("request, often in Korean. Pick the right region and the right axes, then call")
         appendLine("apply_edit once or twice with absolute values.")
@@ -229,6 +286,24 @@ class VibeClient(private val apiKey: String) {
         appendLine("- If the user request is too vague to act on, call apply_edit with target='global' and small reasonable defaults.")
         appendLine()
 
+        // ── Reference image / recipe-transfer path ─────────────────────
+        if (hasReferenceImage) {
+            appendLine("REFERENCE IMAGE ATTACHED:")
+            appendLine("This turn includes a user-provided reference image (the inline_data part before the prompt).")
+            appendLine("Two tools are available:")
+            appendLine("- apply_edit (described above): if the user wants verbal/categorical edits, possibly *relative* to the reference (e.g. '이것보다 살짝 더 따뜻하게', 'this but bluer').")
+            appendLine("- apply_recipe_from_reference: hand off to an on-device color-transfer model that learns the look from the reference and produces a full 8-tone + 21-color-band parameter set automatically. Use this when the user wants the reference's *whole look* transferred — phrases like:")
+            appendLine("  '이 사진처럼' / '이 느낌으로' / '이 색감 적용' / 'make it like this' / 'this look' / '이렇게 바꿔줘'.")
+            appendLine("Choose ONE tool per call:")
+            appendLine("- Pure 'transfer this look' → apply_recipe_from_reference. Optional tone_factor / color_factor ∈ [0, 1.5], default 1.0; '살짝' → 0.5, '강하게' → 1.2.")
+            appendLine("- 'Transfer the look AND also bump shadows' → call apply_recipe_from_reference first, then apply_edit for the extra tweak in the same response.")
+            appendLine("- Verbal description only (no 'this look') → apply_edit, even when reference present.")
+            appendLine()
+        } else {
+            appendLine("NO REFERENCE IMAGE: only apply_edit is available this turn.")
+            appendLine()
+        }
+
         // ── Multi-turn / follow-up handling ────────────────────────────
         appendLine("FOLLOW-UP COMMANDS (multi-turn):")
         appendLine("The contents array shows the recent conversation — alternating user prompts and your previous response summaries.")
@@ -265,7 +340,7 @@ class VibeClient(private val apiKey: String) {
         return parts.joinToString(", ")
     }
 
-    private fun toolSchema(targets: List<String>): JSONObject {
+    private fun toolSchemaEdit(targets: List<String>): JSONObject {
         val targetEnum = JSONArray().also { arr -> targets.forEach { arr.put(it) } }
 
         val properties = JSONObject()
@@ -287,11 +362,58 @@ class VibeClient(private val apiKey: String) {
             .put("color_tuning", colorTuningSchema())
 
         return JSONObject()
-            .put("name", TOOL_NAME)
+            .put("name", TOOL_NAME_EDIT)
             .put(
                 "description",
                 "Apply photo editing parameter changes to a region (mask) or globally. " +
                     "Send absolute values; omit fields you do not want to change.",
+            )
+            .put(
+                "parameters",
+                JSONObject()
+                    .put("type", "object")
+                    .put("properties", properties)
+                    .put("required", JSONArray().put("target")),
+            )
+    }
+
+    private fun toolSchemaRecipe(targets: List<String>): JSONObject {
+        val targetEnum = JSONArray().also { arr -> targets.forEach { arr.put(it) } }
+        val properties = JSONObject()
+            .put(
+                "target",
+                JSONObject()
+                    .put("type", "string")
+                    .put("enum", targetEnum)
+                    .put("description", "Which region receives the transferred look."),
+            )
+            .put(
+                "tone_factor",
+                JSONObject()
+                    .put("type", "number")
+                    .put(
+                        "description",
+                        "Strength of the 8-axis tone transfer. 1.0 = full model output; " +
+                            "0.5 = subtle; 0 = no tone change. Range [0, 1.5].",
+                    ),
+            )
+            .put(
+                "color_factor",
+                JSONObject()
+                    .put("type", "number")
+                    .put(
+                        "description",
+                        "Strength of the 21-band color tuning transfer. 1.0 = full; " +
+                            "0 = no color shift. Range [0, 1.5].",
+                    ),
+            )
+        return JSONObject()
+            .put("name", TOOL_NAME_RECIPE)
+            .put(
+                "description",
+                "Transfer the look of the attached reference image to a target. The app runs " +
+                    "an on-device color-transfer model and applies the result. Only call this " +
+                    "when a reference image is attached and the user wants its overall look.",
             )
             .put(
                 "parameters",
@@ -372,25 +494,36 @@ class VibeClient(private val apiKey: String) {
     }
 
     private fun parseEditFromCall(fc: JSONObject): VibeEdit? {
-        if (fc.optString("name") != TOOL_NAME) return null
+        val name = fc.optString("name")
         val args = fc.optJSONObject("args") ?: return null
         val target = args.optString("target").takeIf { it.isNotBlank() } ?: return null
 
-        val toneChanges = LinkedHashMap<String, Float>()
-        for (key in TONE_KEYS) {
-            if (!args.has(key) || args.isNull(key)) continue
-            val v = args.optDouble(key, Double.NaN)
-            if (!v.isNaN()) toneChanges[key] = v.toFloat().coerceIn(-100f, 100f)
+        return when (name) {
+            TOOL_NAME_EDIT -> {
+                val toneChanges = LinkedHashMap<String, Float>()
+                for (key in TONE_KEYS) {
+                    if (!args.has(key) || args.isNull(key)) continue
+                    val v = args.optDouble(key, Double.NaN)
+                    if (!v.isNaN()) toneChanges[key] = v.toFloat().coerceIn(-100f, 100f)
+                }
+                val colorTuning = parseColorTuning(args.optJSONObject("color_tuning"))
+                if (toneChanges.isEmpty() && colorTuning.isEmpty()) null
+                else VibeEdit(
+                    target = target.lowercase(),
+                    changes = toneChanges,
+                    colorTuning = colorTuning,
+                )
+            }
+            TOOL_NAME_RECIPE -> {
+                val tone = args.optDouble("tone_factor", 1.0).toFloat().coerceIn(0f, 1.5f)
+                val color = args.optDouble("color_factor", 1.0).toFloat().coerceIn(0f, 1.5f)
+                VibeEdit(
+                    target = target.lowercase(),
+                    recipeTransfer = RecipeTransferRequest(toneFactor = tone, colorFactor = color),
+                )
+            }
+            else -> null
         }
-
-        val colorTuning = parseColorTuning(args.optJSONObject("color_tuning"))
-
-        if (toneChanges.isEmpty() && colorTuning.isEmpty()) return null
-        return VibeEdit(
-            target = target.lowercase(),
-            changes = toneChanges,
-            colorTuning = colorTuning,
-        )
     }
 
     private fun parseColorTuning(node: JSONObject?): Map<String, Map<String, Float>> {
@@ -413,7 +546,8 @@ class VibeClient(private val apiKey: String) {
         private const val MODEL = "gemini-3.5-flash"
         private const val ENDPOINT =
             "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
-        private const val TOOL_NAME = "apply_edit"
+        private const val TOOL_NAME_EDIT = "apply_edit"
+        private const val TOOL_NAME_RECIPE = "apply_recipe_from_reference"
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         val TONE_KEYS: List<String> = listOf(

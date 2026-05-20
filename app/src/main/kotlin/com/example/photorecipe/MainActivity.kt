@@ -89,6 +89,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
             AppRoute.PhotoEditor -> PhotoEditorFlow(
                 segmenter = segmenter,
                 vibeClient = vibeClient,
+                generator = generator,
                 onExit = { route = AppRoute.Home },
                 modifier = Modifier.fillMaxSize(),
             )
