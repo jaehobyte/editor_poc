@@ -11,21 +11,19 @@ import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 
 /**
- * Instance segmentation by combining two MediaPipe tasks:
+ * Instance segmentation by combining three sources:
  *
- *   1. ObjectDetector (efficientdet_lite0) — finds bounding boxes + COCO labels.
+ *   1. ObjectDetector (efficientdet_lite0) — bounding boxes + COCO labels.
  *   2. ImageSegmenter (DeepLab v3, Pascal VOC 21 classes) — per-pixel category mask.
+ *      → bbox ∩ class pixels = per-instance mask for foreground objects.
+ *   3. SegFormer-B0 ADE20K (150 classes) — 풍경(sky, road, building, tree...) 마스크.
  *
- * For each detection we crop the semantic mask to the bbox and keep only the
- * pixels belonging to the matching Pascal class — this gives a per-instance
- * pixel mask. Classes outside Pascal VOC fall back to a rectangular bbox mask
- * so the editor still has something to operate on.
- *
- * (Interactive / tap-to-segment removed in favor of this fully automatic path.)
+ * Object 결과(1+2) 와 scenery 결과(3) 를 한 리스트로 합쳐 반환.
  */
 class SegmentationEngine private constructor(
     private val detector: ObjectDetector,
     private val imageSegmenter: ImageSegmenter,
+    private val sceneryEngine: SegFormerSceneryEngine,
 ) : AutoCloseable {
 
     /** A detected object with its own pre-computed alpha mask. */
@@ -39,9 +37,20 @@ class SegmentationEngine private constructor(
 
     /**
      * Detect objects in [bitmap] and return per-instance masks.
-     * Runs ObjectDetector once and ImageSegmenter once, then composes the two.
+     * Runs ObjectDetector once and ImageSegmenter once, then composes the two,
+     * 그리고 SegFormer 풍경 마스크도 함께 합쳐 한 리스트로 반환.
      */
     fun detectInstances(bitmap: Bitmap, maxResults: Int = 8): List<DetectedInstance> {
+        val objects = detectObjects(bitmap, maxResults)
+        val scenery = try {
+            sceneryEngine.detectScenery(bitmap)
+        } catch (t: Throwable) {
+            emptyList()
+        }
+        return objects + scenery
+    }
+
+    private fun detectObjects(bitmap: Bitmap, maxResults: Int): List<DetectedInstance> {
         val image = BitmapImageBuilder(bitmap).build()
 
         // 1) bounding boxes
@@ -81,6 +90,7 @@ class SegmentationEngine private constructor(
     override fun close() {
         detector.close()
         imageSegmenter.close()
+        sceneryEngine.close()
     }
 
     private fun List<com.google.mediapipe.tasks.components.containers.Detection>.toBboxFallback(
@@ -184,7 +194,9 @@ class SegmentationEngine private constructor(
                 .build()
             val imageSegmenter = ImageSegmenter.createFromOptions(context, segOpts)
 
-            return SegmentationEngine(detector, imageSegmenter)
+            val sceneryEngine = SegFormerSceneryEngine.create(context)
+
+            return SegmentationEngine(detector, imageSegmenter, sceneryEngine)
         }
     }
 }
