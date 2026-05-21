@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.photorecipe.EditorParams
 import com.example.photorecipe.editor.applyRecipeMasked
+import com.example.photorecipe.segmentation.SegFormerSceneryEngine
 import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.segmentation.SegmentationEngine.DetectedInstance
 import com.example.photorecipe.tflite.RecipeGenerator
@@ -98,6 +99,8 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -122,6 +125,38 @@ private enum class EditorTab(val label: String, val icon: ImageVector) {
 
 /** 멀티턴 vibe 대화에서 모델에 보낼 최대 turn 수. 토큰 폭주 방지용 상한. */
 private const val VIBE_HISTORY_MAX = 6
+
+/**
+ * 캔버스 좌표 ([tap]) → 이미지 픽셀 좌표. ContentScale.Fit (= GL viewport 의
+ * letterbox 와 동일) 을 가정. 탭이 letterbox 영역에 있으면 null.
+ */
+private fun viewportToImage(
+    tap: Offset,
+    boxSize: IntSize,
+    imgW: Int,
+    imgH: Int,
+): Offset? {
+    val boxW = boxSize.width.toFloat()
+    val boxH = boxSize.height.toFloat()
+    if (boxW <= 0f || boxH <= 0f || imgW <= 0 || imgH <= 0) return null
+    val imgAspect = imgW.toFloat() / imgH.toFloat()
+    val boxAspect = boxW / boxH
+    val drawnW: Float
+    val drawnH: Float
+    if (imgAspect > boxAspect) {
+        drawnW = boxW
+        drawnH = boxW / imgAspect
+    } else {
+        drawnW = boxH * imgAspect
+        drawnH = boxH
+    }
+    val xOffset = (boxW - drawnW) / 2f
+    val yOffset = (boxH - drawnH) / 2f
+    val relX = (tap.x - xOffset) / drawnW
+    val relY = (tap.y - yOffset) / drawnH
+    if (relX < 0f || relX > 1f || relY < 0f || relY > 1f) return null
+    return Offset(relX * imgW, relY * imgH)
+}
 
 /** Global 모드에서 슬라이더 멈춘 뒤 합성본 재계산까지 기다리는 시간 (ms). */
 private const val COMPOSITE_DEBOUNCE_MS = 300L
@@ -155,7 +190,11 @@ fun PhotoEditorScreen(
     var saving by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var detectedInstances by remember { mutableStateOf<List<DetectedInstance>>(emptyList()) }
+    var sceneryAnalysis by remember { mutableStateOf<SegFormerSceneryEngine.Analysis?>(null) }
     var detecting by remember { mutableStateOf(false) }
+    // Tap-segment 모드 — 켜진 상태에서 캔버스 단일 탭 → 그 픽셀의 ADE20K 클래스를
+    // 마스크로 추가. 자동 검출 칩이 놓친 영역 보완용.
+    var tapSegmentMode by remember { mutableStateOf(false) }
 
     // Vibe (Gemini 자연어 편집) 상태.
     var vibePrompt by remember { mutableStateOf("") }
@@ -230,6 +269,8 @@ fun PhotoEditorScreen(
         masks = emptyList()
         selectedMaskId = null
         detectedInstances = emptyList()
+        sceneryAnalysis = null
+        tapSegmentMode = false
         croppedPreview = withContext(Dispatchers.IO) { applyCropTransform(previewBitmap, crop) }
     }
 
@@ -272,9 +313,12 @@ fun PhotoEditorScreen(
         detecting = true
         // 크롭 effect 에서 이미 비웠지만, croppedPreview 만 바뀌는 시나리오 대비 안전망.
         detectedInstances = emptyList()
-        detectedInstances = withContext(Dispatchers.IO) {
-            runCatching { segmenter.detectInstances(croppedPreview) }.getOrElse { emptyList() }
+        sceneryAnalysis = null
+        val result = withContext(Dispatchers.IO) {
+            runCatching { segmenter.detect(croppedPreview) }.getOrNull()
         }
+        detectedInstances = result?.instances.orEmpty()
+        sceneryAnalysis = result?.sceneryAnalysis
         detecting = false
     }
 
@@ -304,6 +348,7 @@ fun PhotoEditorScreen(
                 vibeAttachment = null
                 recipeReference = null
                 recipeStatus = null
+                tapSegmentMode = false
             },
             onSave = {
                 if (saving) return@TopBar
@@ -342,106 +387,168 @@ fun PhotoEditorScreen(
                 .background(PhotoColors.Canvas),
             contentAlignment = Alignment.Center,
         ) {
-            // Global 모드(마스크 선택 안 됨)에서는 꾹 누르면 원본 비교 가능. 한 곳에서
-            // 두 가지 렌더를 다룬다:
-            //   - 마스크 없음 → GL 라이브 (global only = 곧 합성본).
-            //   - 마스크 있음 → CPU 합성본 (debounced).
-            if (isGlobalMode) {
-                var showingOriginal by remember { mutableStateOf(false) }
-                val originalAlpha by animateFloatAsState(
-                    targetValue = if (showingOriginal) 1f else 0f,
-                    animationSpec = tween(durationMillis = 180),
-                    label = "global-compare-fade",
-                )
-                val haptic = LocalHapticFeedback.current
+            // 두 가지 캔버스 동작이 한 pointerInput 에 같이 묶여 있다:
+            //   - 단일 탭 + tapSegmentMode ON → 그 픽셀의 ADE20K 클래스로 마스크 추가
+            //   - 길게 누름 (Global 모드만) → 원본 비교 fade
+            var showingOriginal by remember { mutableStateOf(false) }
+            val originalAlpha by animateFloatAsState(
+                targetValue = if (showingOriginal) 1f else 0f,
+                animationSpec = tween(durationMillis = 180),
+                label = "global-compare-fade",
+            )
+            val haptic = LocalHapticFeedback.current
+            // tap-segment 결과로 추가될 (이미지 좌표) — pointerInput 안에서 set,
+            // LaunchedEffect 가 받아서 무거운 마스크 빌드 작업 수행.
+            var pendingTapImg by remember { mutableStateOf<Offset?>(null) }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(showComposite, previewComposite) {
-                            detectTapGestures(
-                                onPress = {
-                                    val released = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                                        tryAwaitRelease()
-                                        true
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(
+                        tapSegmentMode, isGlobalMode, sceneryAnalysis,
+                        croppedPreview.width, croppedPreview.height,
+                    ) {
+                        detectTapGestures(
+                            onPress = { downOffset ->
+                                val boxSize = size
+                                val released = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                    tryAwaitRelease()
+                                    true
+                                }
+                                if (released == true) {
+                                    // 짧은 탭: tap-segment 활성화 시에만 의미.
+                                    if (tapSegmentMode && sceneryAnalysis != null) {
+                                        val img = viewportToImage(
+                                            downOffset,
+                                            boxSize,
+                                            croppedPreview.width,
+                                            croppedPreview.height,
+                                        )
+                                        if (img != null) pendingTapImg = img
                                     }
-                                    if (released == null) {
+                                } else {
+                                    // 길게 누름: Global 모드에서만 원본 보기.
+                                    if (isGlobalMode) {
                                         showingOriginal = true
                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         tryAwaitRelease()
                                         showingOriginal = false
                                     }
-                                },
-                            )
-                        },
-                ) {
-                    if (showComposite) {
-                        previewComposite?.let { composite ->
-                            Image(
-                                bitmap = composite.asImageBitmap(),
-                                contentDescription = "Composite",
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        }
-                    } else {
-                        ImageGLView(
-                            bitmap = croppedPreview,
-                            global = globalParams,
-                            maskBitmap = null,
-                            mask = null,
+                                }
+                            },
+                        )
+                    },
+            ) {
+                if (isGlobalMode && showComposite) {
+                    previewComposite?.let { composite ->
+                        Image(
+                            bitmap = composite.asImageBitmap(),
+                            contentDescription = "Composite",
+                            contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
-                    if (originalAlpha > 0.001f) {
-                        Image(
-                            bitmap = croppedPreview.asImageBitmap(),
-                            contentDescription = "Original photo (long-press to compare)",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .alpha(originalAlpha),
-                        )
-                    }
-                }
-                if (originalAlpha > 0.001f) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 16.dp)
-                            .alpha(originalAlpha)
-                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50))
-                            .padding(horizontal = 12.dp, vertical = 5.dp),
-                    ) {
-                        Text(
-                            text = "ORIGINAL",
-                            color = PhotoColors.PureWhite,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 1.2.sp,
-                        )
-                    }
-                }
-                if (showComposite && previewing) {
-                    // 미세한 합성 진행 인디케이터 — 우상단 작은 점.
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(12.dp)
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF6BE3FF).copy(alpha = 0.85f)),
+                } else {
+                    ImageGLView(
+                        bitmap = croppedPreview,
+                        global = globalParams,
+                        maskBitmap = if (isGlobalMode) null else activeMask?.featheredAlphaBitmap,
+                        mask = if (isGlobalMode) null else activeMask?.params,
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
-            } else {
-                ImageGLView(
-                    bitmap = croppedPreview,
-                    global = globalParams,
-                    // GL 합성에는 페더된 알파 — 보정 경계가 자연스럽게 fade.
-                    maskBitmap = activeMask?.featheredAlphaBitmap,
-                    mask = activeMask?.params,
-                    modifier = Modifier.fillMaxSize(),
+                if (isGlobalMode && originalAlpha > 0.001f) {
+                    Image(
+                        bitmap = croppedPreview.asImageBitmap(),
+                        contentDescription = "Original photo (long-press to compare)",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(originalAlpha),
+                    )
+                }
+            }
+            if (isGlobalMode && originalAlpha > 0.001f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 16.dp)
+                        .alpha(originalAlpha)
+                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50))
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                ) {
+                    Text(
+                        text = "ORIGINAL",
+                        color = PhotoColors.PureWhite,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.2.sp,
+                    )
+                }
+            }
+            if (isGlobalMode && showComposite && previewing) {
+                // 미세한 합성 진행 인디케이터 — 우상단 작은 점.
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF6BE3FF).copy(alpha = 0.85f)),
                 )
+            }
+
+            // Tap-segment 모드 안내 — 하단 가운데 작은 알약.
+            if (tapSegmentMode) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 16.dp)
+                        .background(Color(0xFF6BE3FF).copy(alpha = 0.92f), RoundedCornerShape(50))
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        text = "사진을 탭해 영역을 추가하세요",
+                        color = PhotoColors.RunwayBlack,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+
+            // pointerInput 에서 detect 된 탭 좌표를 받아 실제 마스크 생성. IO 에서 빌드.
+            LaunchedEffect(pendingTapImg) {
+                val coord = pendingTapImg ?: return@LaunchedEffect
+                val analysis = sceneryAnalysis
+                if (analysis == null) {
+                    pendingTapImg = null
+                    return@LaunchedEffect
+                }
+                val classId = segmenter.sceneryClassAt(analysis, coord.x, coord.y)
+                if (classId in SegFormerSceneryEngine.ADE20K_LABELS.indices) {
+                    val rawLabel = SegFormerSceneryEngine.ADE20K_LABELS[classId]
+                    val maskBitmap = withContext(Dispatchers.IO) {
+                        segmenter.buildSceneryClassMask(
+                            analysis,
+                            classId,
+                            croppedPreview.width,
+                            croppedPreview.height,
+                        )
+                    }
+                    val newMask = Mask(
+                        id = "mask-${System.currentTimeMillis()}-tap-$classId",
+                        alphaBitmap = maskBitmap,
+                        params = EditorParams().apply { copyValuesFrom(globalParams) },
+                        label = rawLabel.replaceFirstChar { it.uppercase() },
+                    )
+                    masks = masks + newMask
+                    selectedMaskId = newMask.id
+                    toast = "Added \"$rawLabel\""
+                } else {
+                    toast = "No class detected at that point"
+                }
+                tapSegmentMode = false
+                pendingTapImg = null
             }
 
             // Lightroom 식 "활성 마스크 포커스": 마스크 *바깥* (원본 영역) 을 어둡게 깔아서
@@ -517,11 +624,14 @@ fun PhotoEditorScreen(
             MaskSelectorRow(
                 masks = masks,
                 selectedId = selectedMaskId,
+                tapSegmentMode = tapSegmentMode,
+                tapSegmentEnabled = sceneryAnalysis != null,
                 onSelect = { selectedMaskId = it },
                 onDelete = { id ->
                     masks = masks.filter { it.id != id }
                     if (selectedMaskId == id) selectedMaskId = null
                 },
+                onToggleTapSegment = { tapSegmentMode = !tapSegmentMode },
             )
             TabStrip(tab = tab, onTabChange = { tab = it })
             Spacer(Modifier.height(8.dp))
@@ -750,8 +860,11 @@ private fun InstanceChip(label: String, score: Float, accent: Color, onClick: ()
 private fun MaskSelectorRow(
     masks: List<Mask>,
     selectedId: String?,
+    tapSegmentMode: Boolean,
+    tapSegmentEnabled: Boolean,
     onSelect: (String?) -> Unit,
     onDelete: (String) -> Unit,
+    onToggleTapSegment: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -767,20 +880,41 @@ private fun MaskSelectorRow(
                 onDelete(m.id)
             }
         }
-        // "+ New" 안내 (실제 추가는 프리뷰 영역 long-press)
+        // Tap-to-segment 토글 — 켜진 동안 캔버스 단일 탭이 마스크 추가로 해석됨.
+        val accent = Color(0xFF6BE3FF)
+        val active = tapSegmentMode && tapSegmentEnabled
+        val bg = when {
+            active -> accent
+            tapSegmentEnabled -> PhotoColors.DarkSurface
+            else -> PhotoColors.DarkSurface
+        }
+        val fg = when {
+            active -> PhotoColors.RunwayBlack
+            tapSegmentEnabled -> PhotoColors.PureWhite
+            else -> PhotoColors.MidSlate
+        }
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
-                .background(PhotoColors.DarkSurface)
-                .border(1.dp, PhotoColors.BorderDark, RoundedCornerShape(50))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .background(bg)
+                .border(
+                    1.dp,
+                    if (active) accent else PhotoColors.BorderDark,
+                    RoundedCornerShape(50),
+                )
+                .let { if (tapSegmentEnabled) it.clickable(onClick = onToggleTapSegment) else it }
+                .padding(start = 10.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Outlined.Add, contentDescription = null, tint = PhotoColors.MidSlate, modifier = Modifier.size(14.dp))
+            Icon(Icons.Outlined.Add, contentDescription = null, tint = fg, modifier = Modifier.size(14.dp))
             Spacer(Modifier.size(4.dp))
             Text(
-                text = "Long-press to add",
-                color = PhotoColors.MidSlate,
+                text = when {
+                    active -> "Tap on photo…"
+                    tapSegmentEnabled -> "Tap to add"
+                    else -> "Tap to add (no analysis)"
+                },
+                color = fg,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
             )

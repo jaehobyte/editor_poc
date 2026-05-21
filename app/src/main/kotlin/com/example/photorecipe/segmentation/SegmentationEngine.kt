@@ -36,22 +36,52 @@ class SegmentationEngine private constructor(
     )
 
     /**
-     * Detect objects in [bitmap] and return per-instance masks.
-     * Runs ObjectDetector once and ImageSegmenter once, then composes the two,
-     * 그리고 SegFormer 풍경 마스크도 함께 합쳐 한 리스트로 반환.
-     *
-     * `@Synchronized` — MediaPipe task runner 들은 thread-safe 가 아니다.
+     * 검출 결과 묶음. [instances] 는 칩으로 띄울 자동 검출 인스턴스들 (object + scenery
+     * 화이트리스트), [sceneryAnalysis] 는 ADE20K 전체 클래스를 가진 raw 라벨 맵 —
+     * tap-segment 처럼 사용자가 임의 위치를 찍어 클래스 별 마스크를 만들 때 재사용.
+     */
+    data class DetectionResult(
+        val instances: List<DetectedInstance>,
+        val sceneryAnalysis: SegFormerSceneryEngine.Analysis?,
+    )
+
+    /**
+     * ObjectDetector + DeepLab + SegFormer 한 번에. SegFormer 분석은 결과 안에 같이
+     * 담아줘서 호출자가 tap-segment 같은 후속 작업에 재사용할 수 있게 한다.
      */
     @Synchronized
-    fun detectInstances(bitmap: Bitmap, maxResults: Int = 8): List<DetectedInstance> {
+    fun detect(bitmap: Bitmap, maxResults: Int = 8): DetectionResult {
         val objects = detectObjects(bitmap, maxResults)
-        val scenery = try {
-            sceneryEngine.detectScenery(bitmap)
+        val analysis = try {
+            sceneryEngine.analyze(bitmap)
         } catch (t: Throwable) {
-            emptyList()
+            null
         }
-        return objects + scenery
+        val scenery = analysis?.let {
+            try { sceneryEngine.extractScenery(it) } catch (t: Throwable) { emptyList() }
+        } ?: emptyList()
+        return DetectionResult(instances = objects + scenery, sceneryAnalysis = analysis)
     }
+
+    /** Backwards-compat — 기존 호출자용. analysis 가 필요하면 [detect] 를 쓸 것. */
+    @Synchronized
+    fun detectInstances(bitmap: Bitmap, maxResults: Int = 8): List<DetectedInstance> =
+        detect(bitmap, maxResults).instances
+
+    /** [SegFormerSceneryEngine.lookupClass] 의 외부 노출용 wrapper. */
+    fun sceneryClassAt(
+        analysis: SegFormerSceneryEngine.Analysis,
+        imgX: Float,
+        imgY: Float,
+    ): Int = sceneryEngine.lookupClass(analysis, imgX, imgY)
+
+    /** [SegFormerSceneryEngine.buildClassMask] 의 외부 노출용 wrapper. */
+    fun buildSceneryClassMask(
+        analysis: SegFormerSceneryEngine.Analysis,
+        classId: Int,
+        dstW: Int,
+        dstH: Int,
+    ): Bitmap = sceneryEngine.buildClassMask(analysis, classId, dstW, dstH)
 
     private fun detectObjects(bitmap: Bitmap, maxResults: Int): List<DetectedInstance> {
         val image = BitmapImageBuilder(bitmap).build()

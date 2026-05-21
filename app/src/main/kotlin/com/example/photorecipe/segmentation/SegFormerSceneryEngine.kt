@@ -36,6 +36,23 @@ class SegFormerSceneryEngine private constructor(
         ByteBuffer.allocateDirect(OUT_SIZE * OUT_SIZE * NUM_CLASSES * 4).order(ByteOrder.nativeOrder())
 
     /**
+     * 한 번의 추론 결과를 그대로 노출. tap-segment 처럼 임의 클래스의 마스크를
+     * 즉석에서 만들어야 할 때 [labels] / [outContentW] 등을 재사용한다.
+     */
+    data class Analysis(
+        /** 128×128 = 16384 byte. 각 byte 는 ADE20K class id (0..149). */
+        val labels: ByteArray,
+        val outSize: Int,
+        val outPadLeft: Int,
+        val outPadTop: Int,
+        val outContentW: Int,
+        val outContentH: Int,
+        /** 입력 bitmap 의 원래 픽셀 크기. 좌표 매핑용. */
+        val sourceWidth: Int,
+        val sourceHeight: Int,
+    )
+
+    /**
      * 풍경 클래스 마스크들. 영역 큰 순서로 정렬되어 반환.
      *
      * `@Synchronized` — 인스턴스 안에 [inputBuf] / [outputBuf] / [interpreter] 가
@@ -43,10 +60,7 @@ class SegFormerSceneryEngine private constructor(
      * 보장해야 할 invariant 를 클래스 안쪽으로 끌고 와서 안전한 기본값으로.
      */
     @Synchronized
-    fun detectScenery(
-        bitmap: Bitmap,
-        minAreaFrac: Float = 0.04f,
-    ): List<SegmentationEngine.DetectedInstance> {
+    fun analyze(bitmap: Bitmap): Analysis {
         val srcW = bitmap.width
         val srcH = bitmap.height
 
@@ -75,38 +89,83 @@ class SegFormerSceneryEngine private constructor(
         val outContentW = (outRight - outPadLeft).coerceAtLeast(1)
         val outContentH = (outBottom - outPadTop).coerceAtLeast(1)
 
-        // padding 을 제외한 컨텐츠 영역에서 클래스별 픽셀 카운트.
+        return Analysis(
+            labels = labels,
+            outSize = OUT_SIZE,
+            outPadLeft = outPadLeft, outPadTop = outPadTop,
+            outContentW = outContentW, outContentH = outContentH,
+            sourceWidth = srcW, sourceHeight = srcH,
+        )
+    }
+
+    /** [Analysis] 에서 화이트리스트의 풍경 클래스들만 골라 [DetectedInstance] 로 변환. */
+    fun extractScenery(
+        analysis: Analysis,
+        minAreaFrac: Float = 0.04f,
+    ): List<SegmentationEngine.DetectedInstance> {
         val counts = IntArray(NUM_CLASSES)
-        for (y in outPadTop until outPadTop + outContentH) {
-            val row = y * OUT_SIZE
-            for (x in outPadLeft until outPadLeft + outContentW) {
-                counts[labels[row + x].toInt() and 0xFF]++
+        for (y in analysis.outPadTop until analysis.outPadTop + analysis.outContentH) {
+            val row = y * analysis.outSize
+            for (x in analysis.outPadLeft until analysis.outPadLeft + analysis.outContentW) {
+                counts[analysis.labels[row + x].toInt() and 0xFF]++
             }
         }
-
-        val totalArea = outContentW * outContentH
+        val totalArea = analysis.outContentW * analysis.outContentH
         val minArea = (totalArea * minAreaFrac).toInt()
 
         val out = ArrayList<SegmentationEngine.DetectedInstance>()
         for ((id, label) in SCENERY_CLASSES) {
             if (counts[id] < minArea) continue
             val mask = buildAlphaMaskFromCrop(
-                labels = labels,
+                labels = analysis.labels,
                 target = id.toByte(),
-                cropX = outPadLeft, cropY = outPadTop,
-                cropW = outContentW, cropH = outContentH,
-                dstW = srcW, dstH = srcH,
+                cropX = analysis.outPadLeft, cropY = analysis.outPadTop,
+                cropW = analysis.outContentW, cropH = analysis.outContentH,
+                dstW = analysis.sourceWidth, dstH = analysis.sourceHeight,
             )
             out += SegmentationEngine.DetectedInstance(
                 label = label,
                 score = counts[id].toFloat() / totalArea,
-                bbox = RectF(0f, 0f, srcW.toFloat(), srcH.toFloat()),
+                bbox = RectF(0f, 0f, analysis.sourceWidth.toFloat(), analysis.sourceHeight.toFloat()),
                 alphaBitmap = mask,
             )
         }
         out.sortByDescending { it.score }
         return out
     }
+
+    /**
+     * 이미지 좌표(0..sourceWidth, 0..sourceHeight) 의 픽셀에 해당하는 ADE20K class id.
+     * 좌표가 컨텐츠 영역 밖이면 -1.
+     */
+    fun lookupClass(analysis: Analysis, imgX: Float, imgY: Float): Int {
+        if (imgX < 0 || imgY < 0 ||
+            imgX >= analysis.sourceWidth || imgY >= analysis.sourceHeight) return -1
+        val nx = imgX / analysis.sourceWidth
+        val ny = imgY / analysis.sourceHeight
+        val outX = analysis.outPadLeft +
+            (nx * analysis.outContentW).toInt().coerceIn(0, analysis.outContentW - 1)
+        val outY = analysis.outPadTop +
+            (ny * analysis.outContentH).toInt().coerceIn(0, analysis.outContentH - 1)
+        return analysis.labels[outY * analysis.outSize + outX].toInt() and 0xFF
+    }
+
+    /** [classId] 영역만 흰색 알파인 (dstW, dstH) 비트맵 — tap-segment 용. */
+    fun buildClassMask(analysis: Analysis, classId: Int, dstW: Int, dstH: Int): Bitmap {
+        return buildAlphaMaskFromCrop(
+            labels = analysis.labels,
+            target = classId.toByte(),
+            cropX = analysis.outPadLeft, cropY = analysis.outPadTop,
+            cropW = analysis.outContentW, cropH = analysis.outContentH,
+            dstW = dstW, dstH = dstH,
+        )
+    }
+
+    /** Backwards-compat — 기존 호출자용 (analyze + extractScenery). */
+    fun detectScenery(
+        bitmap: Bitmap,
+        minAreaFrac: Float = 0.04f,
+    ): List<SegmentationEngine.DetectedInstance> = extractScenery(analyze(bitmap), minAreaFrac)
 
     override fun close() {
         interpreter.close()
@@ -200,6 +259,43 @@ class SegFormerSceneryEngine private constructor(
         private const val RATIO = IN_SIZE / OUT_SIZE  // 4
         private const val NUM_CLASSES = 150
         private val WHITE_ALPHA: Int = AndroidColor.argb(255, 255, 255, 255)
+
+        /**
+         * 전체 ADE20K 150 클래스 라벨. tap-segment 시 [classId] → 사람이 읽을 수 있는
+         * 라벨. 표준 HuggingFace `id2label` 와 동일 순서.
+         */
+        val ADE20K_LABELS: Array<String> = arrayOf(
+            "wall", "building", "sky", "floor", "tree",
+            "ceiling", "road", "bed", "window", "grass",
+            "cabinet", "sidewalk", "person", "earth", "door",
+            "table", "mountain", "plant", "curtain", "chair",
+            "car", "water", "painting", "sofa", "shelf",
+            "house", "sea", "mirror", "rug", "field",
+            "armchair", "seat", "fence", "desk", "rock",
+            "wardrobe", "lamp", "bathtub", "rail", "cushion",
+            "base", "box", "column", "signboard", "chest",
+            "counter", "sand", "sink", "skyscraper", "fireplace",
+            "fridge", "grandstand", "path", "stairs", "runway",
+            "case", "pool table", "pillow", "screen door", "stairway",
+            "river", "bridge", "bookcase", "blind", "coffee table",
+            "toilet", "flower", "book", "hill", "bench",
+            "countertop", "stove", "palm", "kitchen island", "computer",
+            "swivel chair", "boat", "bar", "arcade machine", "hovel",
+            "bus", "towel", "light", "truck", "tower",
+            "chandelier", "awning", "streetlight", "booth", "television",
+            "airplane", "dirt track", "apparel", "pole", "land",
+            "bannister", "escalator", "ottoman", "bottle", "buffet",
+            "poster", "stage", "van", "ship", "fountain",
+            "conveyor", "canopy", "washer", "toy", "pool",
+            "stool", "barrel", "basket", "waterfall", "tent",
+            "bag", "minibike", "cradle", "oven", "ball",
+            "food", "step", "tank", "trade name", "microwave",
+            "pot", "animal", "bicycle", "lake", "dishwasher",
+            "screen", "blanket", "sculpture", "hood", "sconce",
+            "vase", "traffic light", "tray", "ashcan", "fan",
+            "pier", "crt screen", "plate", "monitor", "bulletin board",
+            "shower", "radiator", "glass", "clock", "flag",
+        )
 
         /** ADE20K class id → 사용자에게 보여줄 라벨. 풍경/배경 위주. */
         private val SCENERY_CLASSES: Map<Int, String> = mapOf(
