@@ -90,6 +90,7 @@ import com.example.photorecipe.ui.theme.PhotoColors
 import com.example.photorecipe.util.decodeBitmapForExport
 import com.example.photorecipe.util.decodeBitmapWithOrientation
 import com.example.photorecipe.util.saveBitmapToGallery
+import com.example.photorecipe.vibe.SpeechSession
 import com.example.photorecipe.vibe.VibeClient
 import com.example.photorecipe.vibe.VibeEdit
 import com.example.photorecipe.vibe.VibeTurn
@@ -176,6 +177,12 @@ private fun viewportToImage(
 private const val COMPOSITE_DEBOUNCE_MS = 300L
 
 /**
+ * recordingForTarget 가 Global 칩을 가리킬 때 쓰는 sentinel. (selectedMaskId 의 null 과
+ * 구분해서 "Global 칩에서 voice 가 시작됐다" 를 표현하기 위함.)
+ */
+private const val GLOBAL_TARGET_SENTINEL = "__global__"
+
+/**
  * PhotoEditor 메인:
  * - 한 장 사진에 4탭 보정 + 객체 단위 마스크 보정 지원.
  * - 사진 로드 시 SegmentationEngine 이 ObjectDetector + DeepLab v3 로 자동 인스턴스
@@ -219,6 +226,26 @@ fun PhotoEditorScreen(
     // Vibe 입력 옆 갤러리 버튼으로 첨부한 reference 사진 (Gemini 가 recipe transfer
     // 함수를 호출할지 판단하는 입력).
     var vibeAttachment by remember { mutableStateOf<Bitmap?>(null) }
+
+    // ── 음성 입력 (VibeControls 의 mic + 마스크 칩 long-press 둘이 같이 사용) ───
+    val speech = rememberSpeechSession()
+    val haptic = LocalHapticFeedback.current
+    val recordPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* 권한 결과는 다음 press 때 자연스럽게 반영. */ }
+    val requestRecordPermission: () -> Unit = {
+        recordPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+    /** 현재 어느 chip 이 voice-input 을 trigger 했는지. null = 없음. "__global__" = Global 칩. */
+    var recordingForTarget by remember { mutableStateOf<String?>(null) }
+    // partial 전사 → prompt 동기화 (이전엔 VibeControls 안에서만 했음).
+    LaunchedEffect(speech.recording, speech.partial) {
+        if (speech.recording) vibePrompt = speech.partial
+    }
+    // 녹음 끝나면 (자연 종료 / 에러 / 취소) recordingForTarget 도 같이 정리.
+    LaunchedEffect(speech.recording) {
+        if (!speech.recording) recordingForTarget = null
+    }
 
     // Recipe 탭 — 직접 reference 를 골라 recipe_generator.tflite 로 톤 추론 → 현재
     // 선택된 target params 에 바로 적용. LLM 우회 경로.
@@ -343,6 +370,68 @@ fun PhotoEditorScreen(
         }
     }
     val activeMask: Mask? = masks.firstOrNull { it.id == selectedMaskId }
+
+    // Vibe submit 로직 — VibeControls 의 send 버튼, 마이크 final result, 그리고 chip
+    // long-press 의 final result 가 모두 이 동일한 함수를 호출한다.
+    fun submitVibe() {
+        val text = vibePrompt.trim()
+        if (text.isBlank() || vibeBusy) return
+        vibeBusy = true
+        vibeStatus = null
+        scope.launch {
+            val focus = activeMask?.label?.lowercase() ?: "global"
+            val result = applyVibePrompt(
+                vibeClient = vibeClient,
+                generator = generator,
+                prompt = text,
+                history = vibeHistory,
+                referenceImage = vibeAttachment,
+                content = croppedPreview,
+                detectedInstances = detectedInstances,
+                masks = masks,
+                globalParams = globalParams,
+                currentFocus = focus,
+            )
+            masks = result.newMasks
+            if (result.newSelectedId != null) selectedMaskId = result.newSelectedId
+            vibeStatus = result.status
+            vibeHistory = (vibeHistory + VibeTurn(
+                userPrompt = text,
+                summary = result.summary,
+            )).takeLast(VIBE_HISTORY_MAX)
+            vibePrompt = ""
+            vibeBusy = false
+        }
+    }
+
+    // 마스크 칩 long-press → 그 마스크 선택 + push-to-talk 시작. 손 떼면 stopVoiceForChip 가
+    // session.stop() 호출 → onResults → 최종 텍스트가 들어오며 submitVibe() 자동 실행.
+    fun startVoiceForChip(targetId: String?) {
+        if (speech.recording || vibeBusy) return
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestRecordPermission()
+            return
+        }
+        selectedMaskId = targetId
+        recordingForTarget = targetId ?: GLOBAL_TARGET_SENTINEL
+        vibePrompt = ""
+        val started = speech.start { finalText ->
+            vibePrompt = finalText
+            submitVibe()
+        }
+        if (started) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        } else {
+            recordingForTarget = null
+        }
+    }
+    fun stopVoiceForChip() {
+        if (speech.recording) speech.stop()
+        // recordingForTarget 은 speech.recording 변화 LaunchedEffect 에서 자동 클리어.
+    }
 
     toast?.let { LaunchedEffect(it) { delay(3000); toast = null } }
 
@@ -583,21 +672,53 @@ fun PhotoEditorScreen(
                 }
             }
 
-            // Tap-segment 모드 안내 — 하단 가운데 작은 알약.
-            if (tapSegmentMode) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 16.dp)
-                        .background(Color(0xFF6BE3FF).copy(alpha = 0.92f), RoundedCornerShape(50))
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
-                ) {
-                    Text(
-                        text = "사진을 탭해 영역을 추가하세요",
-                        color = PhotoColors.RunwayBlack,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+            // 하단 가운데 알약 — 우선순위:
+            //   1. chip long-press 로 음성 녹음 중 → 빨간색 + 부분 전사
+            //   2. tap-segment 모드 ON      → 시안색 + 안내
+            when {
+                recordingForTarget != null && speech.recording -> {
+                    val targetLabel = when (recordingForTarget) {
+                        GLOBAL_TARGET_SENTINEL -> "Global"
+                        else -> masks.firstOrNull { it.id == recordingForTarget }?.label ?: ""
+                    }
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 16.dp)
+                            .background(Color(0xFFFF6B6B).copy(alpha = 0.92f), RoundedCornerShape(50))
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = "🎙 $targetLabel · 손 떼면 적용",
+                            color = PhotoColors.PureWhite,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (speech.partial.isNotBlank()) {
+                            Text(
+                                text = speech.partial,
+                                color = PhotoColors.PureWhite.copy(alpha = 0.92f),
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                }
+                tapSegmentMode -> {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 16.dp)
+                            .background(Color(0xFF6BE3FF).copy(alpha = 0.92f), RoundedCornerShape(50))
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            text = "사진을 탭해 영역을 추가하세요",
+                            color = PhotoColors.RunwayBlack,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
                 }
             }
 
@@ -711,12 +832,16 @@ fun PhotoEditorScreen(
                 selectedId = selectedMaskId,
                 tapSegmentMode = tapSegmentMode,
                 tapSegmentEnabled = sceneryAnalysis != null,
+                recordingForTarget = recordingForTarget,
+                rms = speech.rms,
                 onSelect = { selectedMaskId = it },
                 onDelete = { id ->
                     masks = masks.filter { it.id != id }
                     if (selectedMaskId == id) selectedMaskId = null
                 },
                 onToggleTapSegment = { tapSegmentMode = !tapSegmentMode },
+                onChipLongPressStart = { startVoiceForChip(it) },
+                onChipLongPressEnd = { stopVoiceForChip() },
             )
             TabStrip(tab = tab, onTabChange = { tab = it })
             Spacer(Modifier.height(8.dp))
@@ -733,38 +858,9 @@ fun PhotoEditorScreen(
                         )
                     },
                     onClearAttachment = { vibeAttachment = null },
-                    onSubmit = {
-                        val text = vibePrompt.trim()
-                        if (text.isBlank() || vibeBusy) return@VibeControls
-                        vibeBusy = true
-                        vibeStatus = null
-                        scope.launch {
-                            val focus = activeMask?.label?.lowercase() ?: "global"
-                            val result = applyVibePrompt(
-                                vibeClient = vibeClient,
-                                generator = generator,
-                                prompt = text,
-                                history = vibeHistory,
-                                referenceImage = vibeAttachment,
-                                content = croppedPreview,
-                                detectedInstances = detectedInstances,
-                                masks = masks,
-                                globalParams = globalParams,
-                                currentFocus = focus,
-                            )
-                            masks = result.newMasks
-                            if (result.newSelectedId != null) selectedMaskId = result.newSelectedId
-                            vibeStatus = result.status
-                            // 다음 follow-up 때 모델이 직전 결과를 알 수 있도록 history 갱신.
-                            // 최근 N 턴만 유지 — context 길이 폭주 방지.
-                            vibeHistory = (vibeHistory + VibeTurn(
-                                userPrompt = text,
-                                summary = result.summary,
-                            )).takeLast(VIBE_HISTORY_MAX)
-                            vibePrompt = ""
-                            vibeBusy = false
-                        }
-                    },
+                    speech = speech,
+                    requestRecordPermission = requestRecordPermission,
+                    onSubmit = { submitVibe() },
                 )
                 EditorTab.RECIPE -> RecipeControls(
                     reference = recipeReference,
@@ -949,9 +1045,13 @@ private fun MaskSelectorRow(
     selectedId: String?,
     tapSegmentMode: Boolean,
     tapSegmentEnabled: Boolean,
+    recordingForTarget: String?,
+    rms: Float,
     onSelect: (String?) -> Unit,
     onDelete: (String) -> Unit,
     onToggleTapSegment: () -> Unit,
+    onChipLongPressStart: (String?) -> Unit,
+    onChipLongPressEnd: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -961,11 +1061,26 @@ private fun MaskSelectorRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TargetChip(label = "Global", selected = selectedId == null, onClick = { onSelect(null) })
+        TargetChip(
+            label = "Global",
+            selected = selectedId == null,
+            onClick = { onSelect(null) },
+            onLongPressStart = { onChipLongPressStart(null) },
+            onLongPressEnd = { onChipLongPressEnd() },
+            recordingActive = recordingForTarget == GLOBAL_TARGET_SENTINEL,
+            rms = if (recordingForTarget == GLOBAL_TARGET_SENTINEL) rms else 0f,
+        )
         for (m in masks) {
-            TargetChip(label = m.label, selected = selectedId == m.id, onClick = { onSelect(m.id) }) {
-                onDelete(m.id)
-            }
+            TargetChip(
+                label = m.label,
+                selected = selectedId == m.id,
+                onClick = { onSelect(m.id) },
+                onDelete = { onDelete(m.id) },
+                onLongPressStart = { onChipLongPressStart(m.id) },
+                onLongPressEnd = { onChipLongPressEnd() },
+                recordingActive = recordingForTarget == m.id,
+                rms = if (recordingForTarget == m.id) rms else 0f,
+            )
         }
         // Tap-to-segment 토글 — 켜진 동안 캔버스 단일 탭이 마스크 추가로 해석됨.
         val accent = Color(0xFF6BE3FF)
@@ -1016,20 +1131,55 @@ private fun TargetChip(
     onClick: () -> Unit,
     accent: Color? = null,
     onDelete: (() -> Unit)? = null,
+    onLongPressStart: (() -> Unit)? = null,
+    onLongPressEnd: (() -> Unit)? = null,
+    recordingActive: Boolean = false,
+    rms: Float = 0f,
 ) {
+    val recordingColor = Color(0xFFFF6B6B)
     val bg = when {
+        recordingActive -> recordingColor
         selected && accent != null -> accent
         selected -> PhotoColors.PureWhite
         else -> PhotoColors.DarkSurface
     }
-    val fg = if (selected) PhotoColors.RunwayBlack else PhotoColors.PureWhite
-    val borderColor = if (accent != null && !selected) accent.copy(alpha = 0.6f) else PhotoColors.BorderDark
+    val fg = if (selected || recordingActive) PhotoColors.RunwayBlack else PhotoColors.PureWhite
+    val borderColor = when {
+        recordingActive -> recordingColor
+        accent != null && !selected -> accent.copy(alpha = 0.6f)
+        else -> PhotoColors.BorderDark
+    }
+    val scale by animateFloatAsState(
+        targetValue = if (recordingActive) 1f + rms * 0.25f else 1f,
+        animationSpec = tween(durationMillis = 80),
+        label = "chip-rms-pulse",
+    )
+
+    val tapMod = Modifier.pointerInput(label, onLongPressStart, onLongPressEnd) {
+        detectTapGestures(
+            onPress = {
+                val released = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                    tryAwaitRelease()
+                    true
+                }
+                if (released == true) {
+                    onClick()
+                } else {
+                    onLongPressStart?.invoke()
+                    tryAwaitRelease()
+                    onLongPressEnd?.invoke()
+                }
+            },
+        )
+    }
+
     Row(
         modifier = Modifier
+            .scale(scale)
             .clip(RoundedCornerShape(50))
             .background(bg)
             .border(1.dp, borderColor, RoundedCornerShape(50))
-            .clickable(onClick = onClick)
+            .then(tapMod)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1307,21 +1457,13 @@ private fun VibeControls(
     attachment: Bitmap?,
     onPickAttachment: () -> Unit,
     onClearAttachment: () -> Unit,
+    speech: SpeechSession,
+    requestRecordPermission: () -> Unit,
     onSubmit: () -> Unit,
 ) {
     val context = LocalContext.current
-    val session = rememberSpeechSession()
     val haptic = LocalHapticFeedback.current
-
-    // RECORD_AUDIO 권한 요청. 첫 press 에 grant 가 안 되어 있으면 한 번 다이얼로그.
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { /* 권한 결과는 다음 press 때 자연스럽게 반영. */ }
-
-    // 부분 인식 텍스트를 실시간으로 prompt 필드에 흘려보냄.
-    LaunchedEffect(session.recording, session.partial) {
-        if (session.recording) onPromptChange(session.partial)
-    }
+    val session = speech
 
     // 부드러운 펄스 — recording 중에는 rms 기반으로 확대.
     val pulseScale by animateFloatAsState(
@@ -1393,7 +1535,7 @@ private fun VibeControls(
                                     context, Manifest.permission.RECORD_AUDIO,
                                 ) == PackageManager.PERMISSION_GRANTED
                                 if (!granted) {
-                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    requestRecordPermission()
                                     return@detectTapGestures
                                 }
                                 onPromptChange("")
