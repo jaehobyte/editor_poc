@@ -129,6 +129,18 @@ private enum class EditorTab(val label: String, val icon: ImageVector) {
 private const val VIBE_HISTORY_MAX = 6
 
 /**
+ * `DetectedInstance.alphaBitmap` 의 (imgX, imgY) 픽셀이 마스크에 속하는지. Mask.covers
+ * 와 동일한 임계 사용. 검출만 됐고 아직 사용자가 마스크로 안 만든 인스턴스의
+ * hit-test 용.
+ */
+private fun DetectedInstance.coversAt(imgX: Int, imgY: Int): Boolean {
+    if (imgX < 0 || imgY < 0) return false
+    if (imgX >= alphaBitmap.width || imgY >= alphaBitmap.height) return false
+    val px = alphaBitmap.getPixel(imgX, imgY)
+    return ((px ushr 24) and 0xFF) >= 96
+}
+
+/**
  * 캔버스 좌표 ([tap]) → 이미지 픽셀 좌표. ContentScale.Fit (= GL viewport 의
  * letterbox 와 동일) 을 가정. 탭이 letterbox 영역에 있으면 null.
  */
@@ -420,7 +432,8 @@ fun PhotoEditorScreen(
                     .fillMaxSize()
                     .pointerInput(
                         tapSegmentMode, isGlobalMode, sceneryAnalysis,
-                        masks, croppedPreview.width, croppedPreview.height,
+                        masks, detectedInstances,
+                        croppedPreview.width, croppedPreview.height,
                     ) {
                         detectTapGestures(
                             onPress = { downOffset ->
@@ -437,20 +450,44 @@ fun PhotoEditorScreen(
                                         croppedPreview.height,
                                     )
                                     if (img != null) {
-                                        if (tapSegmentMode && sceneryAnalysis != null) {
-                                            // 짧은 탭 + tap-segment ON → 새 마스크 추가.
-                                            pendingTapImg = img
-                                            tapRipplePoint = downOffset
+                                        val ix = img.x.toInt()
+                                        val iy = img.y.toInt()
+                                        // 우선순위 1: 이미 만들어진 마스크가 그 위치를 덮으면 그걸 선택.
+                                        val pickMask = masks
+                                            .filter { it.covers(ix, iy) }
+                                            .minByOrNull { it.coverageArea }
+                                        if (pickMask != null) {
+                                            if (pickMask.id != selectedMaskId) {
+                                                selectedMaskId = pickMask.id
+                                                tapRipplePoint = downOffset
+                                            }
                                         } else {
-                                            // 짧은 탭 + tap-segment OFF → 그 위치를 덮는
-                                            // 기존 마스크 중 가장 좁은 거 선택. 없으면 no-op.
-                                            val ix = img.x.toInt()
-                                            val iy = img.y.toInt()
-                                            val pick = masks
-                                                .filter { it.covers(ix, iy) }
-                                                .minByOrNull { it.coverageArea }
-                                            if (pick != null && pick.id != selectedMaskId) {
-                                                selectedMaskId = pick.id
+                                            // 우선순위 2: 자동 검출된 인스턴스가 그 위치를 덮으면 자동
+                                            // 으로 마스크로 승격 + 선택. 사람/차/풍경 등 — 사용자는 칩
+                                            // 을 별도로 탭하지 않고 사진을 직접 누르는 것만으로 OK.
+                                            val pickInst = detectedInstances
+                                                .filter { it.coversAt(ix, iy) }
+                                                .minByOrNull {
+                                                    val w = it.bbox.width(); val h = it.bbox.height()
+                                                    if (w <= 0f || h <= 0f) Float.MAX_VALUE else w * h
+                                                }
+                                            if (pickInst != null) {
+                                                val maskParams = EditorParams()
+                                                    .apply { copyValuesFrom(globalParams) }
+                                                val newMask = Mask(
+                                                    id = "mask-${System.currentTimeMillis()}-tap-${pickInst.label}",
+                                                    alphaBitmap = pickInst.alphaBitmap,
+                                                    params = maskParams,
+                                                    label = pickInst.label.replaceFirstChar { it.uppercase() },
+                                                )
+                                                masks = masks + newMask
+                                                selectedMaskId = newMask.id
+                                                tapRipplePoint = downOffset
+                                                toast = "Added \"${pickInst.label}\""
+                                            } else if (tapSegmentMode && sceneryAnalysis != null) {
+                                                // 우선순위 3: tap-segment 토글이 켜져 있으면 SegFormer
+                                                // 의 클래스로 새 마스크 (자동 검출이 놓친 작은 객체용).
+                                                pendingTapImg = img
                                                 tapRipplePoint = downOffset
                                             }
                                         }
