@@ -72,8 +72,8 @@ android {
     }
 
     androidResources {
-        // tflite 모델은 압축하지 않음 (mmap 로딩 가능하게)
-        noCompress += "tflite"
+        // tflite / onnx 모델은 압축하지 않음 (mmap 로딩 가능하게)
+        noCompress += listOf("tflite", "onnx")
     }
 
     sourceSets {
@@ -102,6 +102,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.okhttp)
     implementation(libs.mediapipe.tasks.vision)
+    implementation(libs.onnxruntime.android)
 
     debugImplementation(libs.androidx.ui.tooling)
 

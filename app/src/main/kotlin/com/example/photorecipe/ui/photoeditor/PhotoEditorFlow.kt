@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.example.photorecipe.segmentation.PromptSegmentationEngine
 import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.theme.PhotoColors
@@ -37,6 +38,7 @@ private sealed interface PePhase {
 @Composable
 fun PhotoEditorFlow(
     segmenter: SegmentationEngine,
+    promptSegmenter: PromptSegmentationEngine?,
     vibeClient: VibeClient,
     generator: RecipeGenerator,
     onExit: () -> Unit,
@@ -85,6 +87,7 @@ fun PhotoEditorFlow(
                     originalUri = p.uri,
                     previewBitmap = p.preview,
                     segmenter = segmenter,
+                    promptSegmenter = promptSegmenter,
                     vibeClient = vibeClient,
                     generator = generator,
                     onBack = { phase = PePhase.Picker },

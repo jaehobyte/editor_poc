@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.example.photorecipe.gemini.GeminiImageClient
+import com.example.photorecipe.segmentation.PromptSegmentationEngine
 import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.tflite.RecipeGenerator
 import com.example.photorecipe.ui.AppRoute
@@ -60,15 +61,17 @@ private fun AppRoot(modifier: Modifier = Modifier) {
     val generator = remember { RecipeGenerator(context) }
     val gemini = remember { GeminiImageClient(BuildConfig.GEMINI_KEY) }
     val segmenter = remember { SegmentationEngine.create(context) }
+    val promptSegmenter = remember { runCatching { PromptSegmentationEngine.create(context) }.getOrNull() }
     val vibeClient = remember { VibeClient(BuildConfig.GEMINI_KEY) }
 
-    // Composition 이 해제될 때 TFLite Interpreter + MediaPipe task runner 네이티브
-    // 핸들들을 모두 정리. Activity 재생성(회전 등) 마다 네이티브 메모리가 누수되는
-    // 걸 막아준다.
+    // Composition 이 해제될 때 TFLite Interpreter + MediaPipe task runner + ONNX
+    // 세션의 네이티브 핸들들을 모두 정리. Activity 재생성(회전 등) 마다 네이티브
+    // 메모리가 누수되는 걸 막아준다.
     DisposableEffect(Unit) {
         onDispose {
             runCatching { generator.close() }
             runCatching { segmenter.close() }
+            runCatching { promptSegmenter?.close() }
         }
     }
 
@@ -88,6 +91,7 @@ private fun AppRoot(modifier: Modifier = Modifier) {
             )
             AppRoute.PhotoEditor -> PhotoEditorFlow(
                 segmenter = segmenter,
+                promptSegmenter = promptSegmenter,
                 vibeClient = vibeClient,
                 generator = generator,
                 onExit = { route = AppRoute.Home },

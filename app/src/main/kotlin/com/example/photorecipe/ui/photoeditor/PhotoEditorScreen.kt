@@ -82,6 +82,7 @@ import androidx.compose.ui.unit.sp
 import com.example.photorecipe.EditorParams
 import com.example.photorecipe.editor.applyRecipeMasked
 import com.example.photorecipe.segmentation.SegFormerSceneryEngine
+import com.example.photorecipe.segmentation.PromptSegmentationEngine
 import com.example.photorecipe.segmentation.SegmentationEngine
 import com.example.photorecipe.segmentation.SegmentationEngine.DetectedInstance
 import com.example.photorecipe.tflite.RecipeGenerator
@@ -194,6 +195,7 @@ fun PhotoEditorScreen(
     originalUri: Uri,
     previewBitmap: Bitmap,
     segmenter: SegmentationEngine,
+    promptSegmenter: PromptSegmentationEngine?,
     vibeClient: VibeClient,
     generator: RecipeGenerator,
     onBack: () -> Unit,
@@ -212,6 +214,7 @@ fun PhotoEditorScreen(
     var toast by remember { mutableStateOf<String?>(null) }
     var detectedInstances by remember { mutableStateOf<List<DetectedInstance>>(emptyList()) }
     var sceneryAnalysis by remember { mutableStateOf<SegFormerSceneryEngine.Analysis?>(null) }
+    var preparedImage by remember { mutableStateOf<PromptSegmentationEngine.PreparedImage?>(null) }
     var detecting by remember { mutableStateOf(false) }
     // Tap-segment 모드 — 켜진 상태에서 캔버스 단일 탭 → 그 픽셀의 ADE20K 클래스를
     // 마스크로 추가. 자동 검출 칩이 놓친 영역 보완용.
@@ -349,18 +352,26 @@ fun PhotoEditorScreen(
         previewing = false
     }
 
-    // 이미지가 들어오거나 crop 이 바뀔 때마다 인스턴스 자동 검출.
+    // 이미지가 들어오거나 crop 이 바뀔 때마다 인스턴스 자동 검출 + SAM encoder 캐싱.
     LaunchedEffect(croppedPreview) {
         detecting = true
         // 크롭 effect 에서 이미 비웠지만, croppedPreview 만 바뀌는 시나리오 대비 안전망.
         detectedInstances = emptyList()
         sceneryAnalysis = null
+        preparedImage = null
         val result = withContext(Dispatchers.IO) {
             runCatching { segmenter.detect(croppedPreview) }.getOrNull()
         }
         detectedInstances = result?.instances.orEmpty()
         sceneryAnalysis = result?.sceneryAnalysis
         detecting = false
+        // Encoder 는 detect 결과보다 늦게 와도 OK — 칩은 detect 끝나면 바로 보여주고,
+        // SAM long-press 는 prepare 가 끝나야 활성화.
+        preparedImage = promptSegmenter?.let { eng ->
+            withContext(Dispatchers.IO) {
+                runCatching { eng.prepare(croppedPreview) }.getOrNull()
+            }
+        }
     }
 
     // 슬라이더가 편집할 대상 (global or selected mask)
@@ -521,7 +532,7 @@ fun PhotoEditorScreen(
                     .fillMaxSize()
                     .pointerInput(
                         tapSegmentMode, isGlobalMode, sceneryAnalysis,
-                        masks, detectedInstances,
+                        masks, detectedInstances, preparedImage,
                         croppedPreview.width, croppedPreview.height,
                     ) {
                         detectTapGestures(
@@ -630,6 +641,36 @@ fun PhotoEditorScreen(
                                             startVoiceForChip(newMask.id)
                                             tryAwaitRelease()
                                             stopVoiceForChip()
+                                        }
+                                        img != null && preparedImage != null && promptSegmenter != null -> {
+                                            // SAM: 누른 자리를 prompt 로 즉시 새 마스크 생성 + voice-edit.
+                                            // (자동 검출이 못 잡은 임의 영역 — 옷·음식·액세서리 등.)
+                                            val prep = preparedImage!!
+                                            val eng = promptSegmenter
+                                            val mask = withContext(Dispatchers.Default) {
+                                                runCatching { eng.segmentAtPoint(prep, img.x, img.y) }.getOrNull()
+                                            }
+                                            if (mask != null) {
+                                                val maskParams = EditorParams()
+                                                    .apply { copyValuesFrom(globalParams) }
+                                                val newMask = Mask(
+                                                    id = "mask-${System.currentTimeMillis()}-sam",
+                                                    alphaBitmap = mask,
+                                                    params = maskParams,
+                                                    label = "Area",
+                                                )
+                                                masks = masks + newMask
+                                                tapRipplePoint = downOffset
+                                                toast = "Added area mask"
+                                                startVoiceForChip(newMask.id)
+                                                tryAwaitRelease()
+                                                stopVoiceForChip()
+                                            } else if (isGlobalMode) {
+                                                showingOriginal = true
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                tryAwaitRelease()
+                                                showingOriginal = false
+                                            }
                                         }
                                         isGlobalMode -> {
                                             showingOriginal = true
