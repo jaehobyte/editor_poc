@@ -35,7 +35,34 @@ class Mask(
 
     /** 마스크 경계선 비트맵 — 알파 그라디언트가 큰 픽셀만 불투명 흰색. 나머지는 투명. */
     val boundaryBitmap: Bitmap by lazy { computeBoundary(alphaBitmap) }
+
+    /**
+     * 이 마스크가 알파 ≥ 임계치로 덮고 있는 픽셀 수. lazy — tap-to-select 에서
+     * 겹치는 마스크가 여러 개일 때 "가장 좁은(=구체적인) 거" 를 고르려고 사용.
+     */
+    val coverageArea: Int by lazy {
+        val w = alphaBitmap.width
+        val h = alphaBitmap.height
+        val px = IntArray(w * h)
+        alphaBitmap.getPixels(px, 0, w, 0, 0, w, h)
+        var count = 0
+        for (p in px) {
+            if (((p ushr 24) and 0xFF) >= COVERAGE_ALPHA_THRESHOLD) count++
+        }
+        count
+    }
+
+    /** [imgX]/[imgY] (alphaBitmap 좌표계) 픽셀이 이 마스크에 속하는지. */
+    fun covers(imgX: Int, imgY: Int): Boolean {
+        if (imgX < 0 || imgY < 0) return false
+        if (imgX >= alphaBitmap.width || imgY >= alphaBitmap.height) return false
+        val px = alphaBitmap.getPixel(imgX, imgY)
+        return ((px ushr 24) and 0xFF) >= COVERAGE_ALPHA_THRESHOLD
+    }
 }
+
+/** 0..255 알파 중 "마스크에 속한다" 고 판정할 최소 임계. 페더된 가장자리 흡수 안 함. */
+private const val COVERAGE_ALPHA_THRESHOLD = 96
 
 /**
  * @param dimStrength 마스크 바깥의 최대 어둡기 (0..1). 0.6 = 약 60% 검정 오버레이.

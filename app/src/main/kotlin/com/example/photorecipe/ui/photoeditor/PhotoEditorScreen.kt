@@ -420,7 +420,7 @@ fun PhotoEditorScreen(
                     .fillMaxSize()
                     .pointerInput(
                         tapSegmentMode, isGlobalMode, sceneryAnalysis,
-                        croppedPreview.width, croppedPreview.height,
+                        masks, croppedPreview.width, croppedPreview.height,
                     ) {
                         detectTapGestures(
                             onPress = { downOffset ->
@@ -430,17 +430,29 @@ fun PhotoEditorScreen(
                                     true
                                 }
                                 if (released == true) {
-                                    // 짧은 탭: tap-segment 활성화 시에만 의미.
-                                    if (tapSegmentMode && sceneryAnalysis != null) {
-                                        val img = viewportToImage(
-                                            downOffset,
-                                            boxSize,
-                                            croppedPreview.width,
-                                            croppedPreview.height,
-                                        )
-                                        if (img != null) {
+                                    val img = viewportToImage(
+                                        downOffset,
+                                        boxSize,
+                                        croppedPreview.width,
+                                        croppedPreview.height,
+                                    )
+                                    if (img != null) {
+                                        if (tapSegmentMode && sceneryAnalysis != null) {
+                                            // 짧은 탭 + tap-segment ON → 새 마스크 추가.
                                             pendingTapImg = img
                                             tapRipplePoint = downOffset
+                                        } else {
+                                            // 짧은 탭 + tap-segment OFF → 그 위치를 덮는
+                                            // 기존 마스크 중 가장 좁은 거 선택. 없으면 no-op.
+                                            val ix = img.x.toInt()
+                                            val iy = img.y.toInt()
+                                            val pick = masks
+                                                .filter { it.covers(ix, iy) }
+                                                .minByOrNull { it.coverageArea }
+                                            if (pick != null && pick.id != selectedMaskId) {
+                                                selectedMaskId = pick.id
+                                                tapRipplePoint = downOffset
+                                            }
                                         }
                                     }
                                 } else {
