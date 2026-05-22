@@ -96,6 +96,8 @@ import com.example.photorecipe.vibe.VibeTurn
 import com.example.photorecipe.vibe.rememberSpeechSession
 
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.Canvas
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
@@ -400,6 +402,18 @@ fun PhotoEditorScreen(
             // tap-segment 결과로 추가될 (이미지 좌표) — pointerInput 안에서 set,
             // LaunchedEffect 가 받아서 무거운 마스크 빌드 작업 수행.
             var pendingTapImg by remember { mutableStateOf<Offset?>(null) }
+            // 탭 위치 ripple 애니메이션용 — 캔버스 좌표 + 진행값.
+            var tapRipplePoint by remember { mutableStateOf<Offset?>(null) }
+            val rippleProgress = remember { Animatable(0f) }
+            LaunchedEffect(tapRipplePoint) {
+                if (tapRipplePoint == null) return@LaunchedEffect
+                rippleProgress.snapTo(0f)
+                rippleProgress.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(durationMillis = 520),
+                )
+                tapRipplePoint = null
+            }
 
             Box(
                 modifier = Modifier
@@ -424,7 +438,10 @@ fun PhotoEditorScreen(
                                             croppedPreview.width,
                                             croppedPreview.height,
                                         )
-                                        if (img != null) pendingTapImg = img
+                                        if (img != null) {
+                                            pendingTapImg = img
+                                            tapRipplePoint = downOffset
+                                        }
                                     }
                                 } else {
                                     // 길게 누름: Global 모드에서만 원본 보기.
@@ -496,6 +513,25 @@ fun PhotoEditorScreen(
                         .clip(CircleShape)
                         .background(Color(0xFF6BE3FF).copy(alpha = 0.85f)),
                 )
+            }
+
+            // Tap ripple — 탭한 위치에 시안색 펄스. 마스크 빌드/뷰 전환 동안 잠깐 visible.
+            tapRipplePoint?.let { pt ->
+                val progress = rippleProgress.value
+                val alpha = (1f - progress).coerceIn(0f, 1f)
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val maxR = 56.dp.toPx()
+                    drawCircle(
+                        color = Color(0xFF6BE3FF).copy(alpha = alpha * 0.35f),
+                        radius = progress * maxR,
+                        center = pt,
+                    )
+                    drawCircle(
+                        color = Color(0xFF6BE3FF).copy(alpha = alpha),
+                        radius = 4.dp.toPx() + (1f - progress) * 4.dp.toPx(),
+                        center = pt,
+                    )
+                }
             }
 
             // Tap-segment 모드 안내 — 하단 가운데 작은 알약.
@@ -654,6 +690,7 @@ fun PhotoEditorScreen(
                         vibeBusy = true
                         vibeStatus = null
                         scope.launch {
+                            val focus = activeMask?.label?.lowercase() ?: "global"
                             val result = applyVibePrompt(
                                 vibeClient = vibeClient,
                                 generator = generator,
@@ -664,6 +701,7 @@ fun PhotoEditorScreen(
                                 detectedInstances = detectedInstances,
                                 masks = masks,
                                 globalParams = globalParams,
+                                currentFocus = focus,
                             )
                             masks = result.newMasks
                             if (result.newSelectedId != null) selectedMaskId = result.newSelectedId
@@ -1561,6 +1599,12 @@ private suspend fun applyVibePrompt(
     detectedInstances: List<DetectedInstance>,
     masks: List<Mask>,
     globalParams: EditorParams,
+    /**
+     * UI 에서 현재 사용자가 선택해둔 편집 target. 마스크가 선택돼 있으면 그 라벨,
+     * Global 이면 "global". 모델이 region-ambiguous 한 발화 ("더 따뜻하게") 를 받았을
+     * 때 여기에 default 함.
+     */
+    currentFocus: String,
 ): VibeApplyResult {
     // ── 1. 후보 라벨 목록 & 현재 값 직렬화 ─────────────────────────
     val detectionLabels = detectedInstances.map { it.label.lowercase() }.distinct()
@@ -1575,7 +1619,14 @@ private suspend fun applyVibePrompt(
 
     // ── 2. Gemini 호출 ────────────────────────────────────────────
     val response = runCatching {
-        vibeClient.proposeEdits(prompt, targets, currentValues, history, referenceImage)
+        vibeClient.proposeEdits(
+            userPrompt = prompt,
+            availableTargets = targets,
+            currentValues = currentValues,
+            history = history,
+            referenceImage = referenceImage,
+            currentFocus = currentFocus,
+        )
     }.getOrElse { e ->
         val msg = "Gemini error: ${e.message?.take(120)}"
         return VibeApplyResult(

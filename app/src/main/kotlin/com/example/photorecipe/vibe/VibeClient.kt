@@ -95,13 +95,16 @@ class VibeClient(private val apiKey: String) {
         currentValues: Map<String, EditorParams>,
         history: List<VibeTurn> = emptyList(),
         referenceImage: Bitmap? = null,
+        currentFocus: String? = null,
     ): VibeResponse = withContext(Dispatchers.IO) {
         check(apiKey.isNotBlank()) { "GEMINI_KEY is missing — populate .env and rebuild" }
         require(userPrompt.isNotBlank()) { "prompt must not be blank" }
         require(availableTargets.isNotEmpty()) { "must offer at least one target (e.g. 'global')" }
 
         val referenceB64 = referenceImage?.let { bitmapToJpegBase64(it) }
-        val body = buildRequestBody(userPrompt, availableTargets, currentValues, history, referenceB64)
+        val body = buildRequestBody(
+            userPrompt, availableTargets, currentValues, history, referenceB64, currentFocus,
+        )
         val req = Request.Builder()
             .url("$ENDPOINT?key=$apiKey")
             .post(body.toRequestBody(JSON))
@@ -139,11 +142,15 @@ class VibeClient(private val apiKey: String) {
         state: Map<String, EditorParams>,
         history: List<VibeTurn>,
         referenceB64: String?,
+        currentFocus: String?,
     ): String {
         val systemInstruction = JSONObject().put(
             "parts",
             JSONArray().put(
-                JSONObject().put("text", buildSystemPrompt(targets, state, referenceB64 != null)),
+                JSONObject().put(
+                    "text",
+                    buildSystemPrompt(targets, state, referenceB64 != null, currentFocus),
+                ),
             ),
         )
         // 최근 turn 들을 user/model 텍스트 페어로 풀어서 contents 에 펼침.
@@ -200,6 +207,7 @@ class VibeClient(private val apiKey: String) {
         targets: List<String>,
         state: Map<String, EditorParams>,
         hasReferenceImage: Boolean,
+        currentFocus: String?,
     ): String = buildString {
         appendLine("You are a Lightroom-style photo editor assistant. The user types or speaks an edit")
         appendLine("request, often in Korean. Pick the right region and the right axes, then call")
@@ -233,6 +241,17 @@ class VibeClient(private val apiKey: String) {
             appendLine()
         }
         appendLine()
+
+        // ── Current focus (default target for unspecified requests) ────
+        if (currentFocus != null) {
+            appendLine("CURRENT FOCUS: $currentFocus")
+            appendLine("The user is actively editing this region in the UI right now.")
+            appendLine("If the user's request does NOT explicitly name a region (e.g. '더 따뜻하게',")
+            appendLine("'쨍하게', 'a bit warmer', 'more vivid'), default the target to CURRENT FOCUS.")
+            appendLine("Only override CURRENT FOCUS when the user clearly names another region")
+            appendLine("(e.g. '하늘만', 'building 좀', '전체적으로 / global').")
+            appendLine()
+        }
 
         // ── Tone axes ──────────────────────────────────────────────────
         appendLine("TONE AXES (each [-100, 100], identity=0):")
@@ -277,13 +296,23 @@ class VibeClient(private val apiKey: String) {
 
         // ── Output rules ───────────────────────────────────────────────
         appendLine("OUTPUT RULES:")
-        appendLine("- ALWAYS pick the most specific target available. If '하늘' is one of the targets, use it; don't pick 'global'.")
+        appendLine("- When the user NAMES a region (any mask label above, or '전체'/'global' for the whole image), target THAT region exactly.")
+        if (currentFocus != null) {
+            appendLine("- When the user does NOT name a region (e.g. '더 따뜻하게', '쨍하게'), target CURRENT FOCUS ($currentFocus).")
+            appendLine("- '전체'/'global' is chosen ONLY when the user explicitly says so. Don't fall back to 'global' just because the request is short — fall back to CURRENT FOCUS instead.")
+        } else {
+            appendLine("- When the user does NOT name a region, default to 'global'.")
+        }
         appendLine("- Pick targets only from the list above. Do not invent labels.")
         appendLine("- Send ABSOLUTE final values (not deltas). App will overwrite existing values for fields you set.")
         appendLine("- Only include fields you actually want to change. Omitted fields keep current values.")
         appendLine("- Magnitudes: 살짝/slightly = ±10..±15, default = ±20..±35, 많이/strongly = ±40..±60, 극단 = ±70..")
         appendLine("- You may call apply_edit multiple times if the request mentions multiple regions.")
-        appendLine("- If the user request is too vague to act on, call apply_edit with target='global' and small reasonable defaults.")
+        if (currentFocus != null) {
+            appendLine("- If the user request is too vague to act on, call apply_edit with target=CURRENT FOCUS ($currentFocus) and small reasonable defaults.")
+        } else {
+            appendLine("- If the user request is too vague to act on, call apply_edit with target='global' and small reasonable defaults.")
+        }
         appendLine()
 
         // ── Reference image / recipe-transfer path ─────────────────────
