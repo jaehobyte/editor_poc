@@ -582,12 +582,61 @@ fun PhotoEditorScreen(
                                         }
                                     }
                                 } else {
-                                    // 길게 누름: Global 모드에서만 원본 보기.
-                                    if (isGlobalMode) {
-                                        showingOriginal = true
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        tryAwaitRelease()
-                                        showingOriginal = false
+                                    // 길게 누름:
+                                    //   1. 마스크가 덮는 영역 → 그 마스크 voice-edit
+                                    //      (마스크 칩 long-press 와 동일 동작)
+                                    //   2. 검출만 됐고 마스크 안 된 영역 → 자동으로 마스크
+                                    //      승격 + 그 마스크 voice-edit
+                                    //   3. 위 둘 다 아니고 Global 모드 → 원본 비교 (기존)
+                                    val img = viewportToImage(
+                                        downOffset, boxSize,
+                                        croppedPreview.width, croppedPreview.height,
+                                    )
+                                    val ix = img?.x?.toInt() ?: -1
+                                    val iy = img?.y?.toInt() ?: -1
+                                    val maskHit = if (img != null) {
+                                        masks.filter { it.covers(ix, iy) }
+                                            .minByOrNull { it.coverageArea }
+                                    } else null
+                                    val instHit = if (img != null && maskHit == null) {
+                                        detectedInstances
+                                            .filter { it.coversAt(ix, iy) }
+                                            .minByOrNull {
+                                                val w = it.bbox.width()
+                                                val h = it.bbox.height()
+                                                if (w <= 0f || h <= 0f) Float.MAX_VALUE else w * h
+                                            }
+                                    } else null
+
+                                    when {
+                                        maskHit != null -> {
+                                            tapRipplePoint = downOffset
+                                            startVoiceForChip(maskHit.id)
+                                            tryAwaitRelease()
+                                            stopVoiceForChip()
+                                        }
+                                        instHit != null -> {
+                                            val maskParams = EditorParams()
+                                                .apply { copyValuesFrom(globalParams) }
+                                            val newMask = Mask(
+                                                id = "mask-${System.currentTimeMillis()}-vp-${instHit.label}",
+                                                alphaBitmap = instHit.alphaBitmap,
+                                                params = maskParams,
+                                                label = instHit.label.replaceFirstChar { it.uppercase() },
+                                            )
+                                            masks = masks + newMask
+                                            tapRipplePoint = downOffset
+                                            toast = "Added \"${instHit.label}\""
+                                            startVoiceForChip(newMask.id)
+                                            tryAwaitRelease()
+                                            stopVoiceForChip()
+                                        }
+                                        isGlobalMode -> {
+                                            showingOriginal = true
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            tryAwaitRelease()
+                                            showingOriginal = false
+                                        }
                                     }
                                 }
                             },
