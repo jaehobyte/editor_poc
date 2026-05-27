@@ -20,7 +20,16 @@ import java.nio.channels.FileChannel
  * 전처리: center-crop 정방형 → 224×224 bilinear resize → CHW [0, 1].
  * ImageNet 정규화는 TFLite 그래프 내부에 포함되어 있어 외부 처리 불필요.
  */
-class RecipeGenerator(context: Context) : AutoCloseable {
+class RecipeGenerator(
+    context: Context,
+    /**
+     * 모델 출력 29 개 (∈ [-1, 1]) 에 적용할 saturating boost 의 강도.
+     *   P_new = (α·P) / (1 + (α-1)·|P|)
+     * α=1 이면 원본 그대로. α>1 이면 0 근처는 α 배에 가깝게, ±1 근처는 그대로 유지
+     * (clipping 없는 채도/색 강조).
+     */
+    private val colorBoostAlpha: Float = COLOR_BOOST_ALPHA,
+) : AutoCloseable {
 
     private val interpreter: Interpreter
 
@@ -47,7 +56,16 @@ class RecipeGenerator(context: Context) : AutoCloseable {
         val outputs = mutableMapOf<Int, Any>(0 to output)
         interpreter.runForMultipleInputsOutputs(inputs, outputs)
 
-        return output[0]
+        return boost(output[0], colorBoostAlpha)
+    }
+
+    private fun boost(params: FloatArray, alpha: Float): FloatArray {
+        if (alpha == 1f) return params
+        for (i in params.indices) {
+            val p = params[i]
+            params[i] = (alpha * p) / (1f + (alpha - 1f) * kotlin.math.abs(p))
+        }
+        return params
     }
 
     override fun close() {
@@ -96,5 +114,6 @@ class RecipeGenerator(context: Context) : AutoCloseable {
         const val MODEL_PATH = "recipe_generator_v260422.tflite"
         const val IMG_SIZE = 224
         const val NUM_PARAMS = 29
+        const val COLOR_BOOST_ALPHA = 5f
     }
 }
