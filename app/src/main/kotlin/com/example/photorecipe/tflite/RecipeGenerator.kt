@@ -23,10 +23,12 @@ import java.nio.channels.FileChannel
 class RecipeGenerator(
     context: Context,
     /**
-     * 모델 출력 29 개 (∈ [-1, 1]) 에 적용할 saturating boost 의 강도.
+     * 모델 출력의 HSL 슬라이더(인덱스 [BOOST_START_INDEX] 이후, 21 개) 에만 적용할
+     * saturating boost 강도. tone 파라미터 (temperature/contrast/.../shadows) 는
+     * 원본 그대로 둔다.
      *   P_new = (α·P) / (1 + (α-1)·|P|)
-     * α=1 이면 원본 그대로. α>1 이면 0 근처는 α 배에 가깝게, ±1 근처는 그대로 유지
-     * (clipping 없는 채도/색 강조).
+     * α=1 이면 비활성. α>1 이면 0 근처는 α 배에 가깝게, ±1 근처는 그대로 유지
+     * (clipping 없는 색 강조).
      */
     private val colorBoostAlpha: Float = COLOR_BOOST_ALPHA,
 ) : AutoCloseable {
@@ -61,7 +63,7 @@ class RecipeGenerator(
 
     private fun boost(params: FloatArray, alpha: Float): FloatArray {
         if (alpha == 1f) return params
-        for (i in params.indices) {
+        for (i in BOOST_START_INDEX until params.size) {
             val p = params[i]
             params[i] = (alpha * p) / (1f + (alpha - 1f) * kotlin.math.abs(p))
         }
@@ -114,6 +116,8 @@ class RecipeGenerator(
         const val MODEL_PATH = "recipe_generator_v260422.tflite"
         const val IMG_SIZE = 224
         const val NUM_PARAMS = 29
-        const val COLOR_BOOST_ALPHA = 5f
+        /** boost 시작 인덱스. 0..7 = tone, 8..28 = HSL color tuning. */
+        const val BOOST_START_INDEX = 8
+        const val COLOR_BOOST_ALPHA = 3f
     }
 }
