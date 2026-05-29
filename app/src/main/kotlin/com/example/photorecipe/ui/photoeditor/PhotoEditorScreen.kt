@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Crop
+import androidx.compose.material.icons.outlined.Brush
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.FlipCameraAndroid
@@ -216,6 +217,10 @@ fun PhotoEditorScreen(
     var sceneryAnalysis by remember { mutableStateOf<SegFormerSceneryEngine.Analysis?>(null) }
     var preparedImage by remember { mutableStateOf<PromptSegmentationEngine.PreparedImage?>(null) }
     var detecting by remember { mutableStateOf(false) }
+    // Drawing-based interactive segmentation 상태. drawingMode 가 true 면 캔버스 위에
+    // 스크리블 오버레이가 떠서 long-press 등 기존 제스처를 가린다.
+    var drawingMode by remember { mutableStateOf(false) }
+    var nextLayerIndex by remember { mutableStateOf(1) }
     // Tap-segment 모드 — 켜진 상태에서 캔버스 단일 탭 → 그 픽셀의 ADE20K 클래스를
     // 마스크로 추가. 자동 검출 칩이 놓친 영역 보완용.
     var tapSegmentMode by remember { mutableStateOf(false) }
@@ -451,6 +456,8 @@ fun PhotoEditorScreen(
     ) {
         TopBar(
             saving = saving,
+            drawEnabled = preparedImage != null && !drawingMode,
+            onDraw = { if (preparedImage != null) drawingMode = true },
             onBack = onBack,
             onReset = {
                 globalParams.reset()
@@ -896,6 +903,35 @@ fun PhotoEditorScreen(
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                 )
             }
+
+            // VibeSpot drawing overlay — 사용자가 캔버스에 직접 스크리블해서 영역을
+            // 만드는 모드. 켜지면 fillMaxSize 로 캔버스 위를 덮어 기존 long-press 등 제스처를
+            // 가린다. 완료 시 새 Mask 로 승격 + 그 즉시 음성 녹음 시작.
+            if (drawingMode && preparedImage != null && promptSegmenter != null) {
+                DrawingOverlay(
+                    promptSegmenter = promptSegmenter,
+                    prepared = preparedImage!!,
+                    imageWidth = croppedPreview.width,
+                    imageHeight = croppedPreview.height,
+                    proposedLabel = "Layer $nextLayerIndex",
+                    onCancel = { drawingMode = false },
+                    onCommit = { label, mask ->
+                        val maskParams = EditorParams().apply { copyValuesFrom(globalParams) }
+                        val newMask = Mask(
+                            id = "mask-${System.currentTimeMillis()}-draw",
+                            alphaBitmap = mask,
+                            params = maskParams,
+                            label = label,
+                        )
+                        masks = masks + newMask
+                        selectedMaskId = newMask.id
+                        nextLayerIndex++
+                        drawingMode = false
+                        startVoiceForChip(newMask.id)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
 
         Column(
@@ -1013,7 +1049,14 @@ fun PhotoEditorScreen(
 }
 
 @Composable
-private fun TopBar(saving: Boolean, onBack: () -> Unit, onReset: () -> Unit, onSave: () -> Unit) {
+private fun TopBar(
+    saving: Boolean,
+    drawEnabled: Boolean,
+    onBack: () -> Unit,
+    onReset: () -> Unit,
+    onDraw: () -> Unit,
+    onSave: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1028,6 +1071,13 @@ private fun TopBar(saving: Boolean, onBack: () -> Unit, onReset: () -> Unit, onS
             color = PhotoColors.MidSlate,
         )
         Spacer(Modifier.weight(1f))
+        IconButton(onClick = onDraw, enabled = drawEnabled) {
+            Icon(
+                Icons.Outlined.Brush,
+                contentDescription = "Draw a layer",
+                tint = if (drawEnabled) PhotoColors.PureWhite else PhotoColors.MidSlate,
+            )
+        }
         IconButton(onClick = onReset) {
             Icon(Icons.Outlined.RestartAlt, contentDescription = "Reset", tint = PhotoColors.PureWhite)
         }
