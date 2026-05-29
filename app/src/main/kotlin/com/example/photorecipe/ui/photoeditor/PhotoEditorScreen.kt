@@ -456,8 +456,15 @@ fun PhotoEditorScreen(
     ) {
         TopBar(
             saving = saving,
-            drawEnabled = preparedImage != null && !drawingMode,
-            onDraw = { if (preparedImage != null) drawingMode = true },
+            // 항상 enabled — 진단 친화성. 클릭 시 상태에 따라 토스트로 알려준다.
+            drawEnabled = promptSegmenter != null && !drawingMode,
+            onDraw = {
+                when {
+                    promptSegmenter == null -> toast = "Drawing 엔진 초기화 실패"
+                    preparedImage == null -> toast = "SAM 준비 중... 잠시만요"
+                    else -> drawingMode = true
+                }
+            },
             onBack = onBack,
             onReset = {
                 globalParams.reset()

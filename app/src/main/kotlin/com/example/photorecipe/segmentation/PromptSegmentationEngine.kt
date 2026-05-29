@@ -279,9 +279,10 @@ class PromptSegmentationEngine private constructor(
 
         fun create(context: Context): PromptSegmentationEngine {
             val env = OrtEnvironment.getEnvironment()
+            // NNAPI provider 는 v2 decoder 의 mask_downscaling Conv 스택을 못 받아 session
+            // 생성이 실패할 수 있다. 일단 안전하게 CPU 만. 추후 QNN EP 로 분기 예정.
             val opts = OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(4)
-                runCatching { addNnapi() }
             }
             val encBytes = context.assets.open(ENC_MODEL).use { it.readBytes() }
             val decBytes = context.assets.open(DEC_MODEL).use { it.readBytes() }
